@@ -1,0 +1,198 @@
+{
+    "events": [
+        {
+            "event_name": "WNC-DnsResult",
+            "event_type": "Task",
+            "wake_condition": {
+                "event": "sched_wakeup",
+                "match_field": "comm",
+                "match_value": "WNC-DnsResult"
+            },
+            "start_condition": {
+                "event": "sched_switch",
+                "match_field": "next_comm",
+                "match_value": "WNC-DnsResult"
+            },
+            "end_condition": {
+                "event": "sched_switch",
+                "match_field": "prev_comm",
+                "match_value": "WNC-DnsResult"
+            },
+            "merge_gap_msec": 1
+        },
+        {
+            "event_name": "WNC-SensorHWPro",
+            "event_type": "Task",
+            "wake_condition": {
+                "event": "sched_wakeup",
+                "match_field": "comm",
+                "match_value": "WNC-SensorHWPro"
+            },
+            "start_condition": {
+                "event": "sched_switch",
+                "match_field": "next_comm",
+                "match_value": "WNC-SensorHWPro"
+            },
+            "end_condition": {
+                "event": "sched_switch",
+                "match_field": "prev_comm",
+                "match_value": "WNC-SensorHWPro"
+            },
+            "merge_gap_msec": 1
+        },
+        {
+            "event_name": "Uni-PERSONAL_IM",
+            "event_type": "Task",
+            "wake_condition": {
+                "event": "sched_wakeup",
+                "match_field": "comm",
+                "match_value": "Uni:PERSONAL_IM"
+            },
+            "start_condition": [
+                {
+                    "event": "sched_switch",
+                    "match_field": "next_comm",
+                    "match_value": "Uni:PERSONAL_IM"
+                },
+                {
+                    "event": "task_rename",
+                    "match_field": "newcomm",
+                    "match_value": "Uni:PERSONAL_IM"
+                }
+            ],
+            "end_condition": [
+                {
+                    "event": "sched_switch",
+                    "match_field": "prev_comm",
+                    "match_value": "Uni:PERSONAL_IM"
+                },
+                {
+                    "event": "task_rename",
+                    "match_field": "oldcomm",
+                    "match_value": "Uni:PERSONAL_IM"
+                }
+            ]
+        },
+        {
+            "event_name": "WNC-IspRequest",
+            "event_type": "Task",
+            "wake_condition": {
+                "event": "sched_wakeup",
+                "match_field": "comm",
+                "match_value": "WNC-IspRequest"
+            },
+            "start_condition": {
+                "event": "sched_switch",
+                "match_field": "next_comm",
+                "match_value": "WNC-IspRequest"
+            },
+            "end_condition": {
+                "event": "sched_switch",
+                "match_field": "prev_comm",
+                "match_value": "WNC-IspRequest"
+            },
+            "merge_gap_msec": 1.0
+        },
+        {
+            "event_name": "WNC-EisPlugin",
+            "event_type": "Task",
+            "wake_condition": {
+                "event": "sched_wakeup",
+                "match_field": "comm",
+                "match_value": "WNC-EisPlugin"
+            },
+            "start_condition": {
+                "event": "sched_switch",
+                "match_field": "next_comm",
+                "match_value": "WNC-EisPlugin"
+            },
+            "end_condition": {
+                "event": "sched_switch",
+                "match_field": "prev_comm",
+                "match_value": "WNC-EisPlugin"
+            },
+            "merge_gap_msec": 15.0
+        },
+        {
+            "event_name": "IRQ Handler",
+            "event_type": "Interrupt",
+            "start_condition": {
+              "event": "sched_waking",
+              "match_field": "comm",
+              "match_value": "ksoftirqd"
+            },
+            "id_field": "pid", 
+            "id_value": null,  
+            "id_regex": "irq_id=(\\d+)",
+            "end_event": "sched_switch",
+            "end_contains": "prev_pid",
+            "interval_tagging": {
+            "interval_msec": 16.7,
+            "fs_tag": "FS",
+            "fe_tag": "FE"
+            },
+            "frame_numbering_config": {
+            "frame_number_event_name": "FS",
+            "start_frame_number": 1
+            }
+        },
+        {
+            "event_name": "DnsToEis_Latency",
+            "event_type": "Latency",
+            "start_event_condition": {
+                "event": "sched_switch",
+                "match_field": "prev_comm",
+                "match_value": "WNC-DnsResult"
+            },
+            "end_event_condition": {
+                "event": "sched_switch",
+                "match_field": "next_comm",
+                "match_value": "WNC-EisPlugin"
+            }
+        },
+        {
+            "event_name": "EisToGDC_Latency",
+            "event_type": "Latency",
+            "start_event_condition": {
+                "event": "sched_switch",
+                "match_field": "prev_comm",
+                "match_value": "WNC-EisPlugin"
+            },
+            "end_event_condition": {
+                "event": "sched_switch",
+                "match_field": "next_comm",
+                "match_value": "WNC-GdcProcesso"
+            }
+        },
+        {
+            "event_name": "FrameLatency",
+            "event_type": "ComplexLatency",
+            "start_interrupt": {
+              "event_type": "IRQ Handler",
+              "event_name": "VSync IRQ",
+              "tag": "FE"
+            },
+            "end_interrupt": {
+              "event_type": "IRQ Handler",
+              "event_name": "Display IRQ",
+              "tag": "FS"
+            },
+            "mid_event": [
+                {
+                "event_type": "SomeEventA",
+                "match_field": "id",
+                "match_value": "A",
+                "margin_gap": 2.5
+                },
+                {
+                "event_type": "SomeEventB",
+                "match_field": "id",
+                "match_value": "B",
+                "margin_gap": 2.5
+                }
+            ]
+          }
+    ],
+    "config_version": "1.0",
+    "description": "Event configuration for systrace analysis"
+} 

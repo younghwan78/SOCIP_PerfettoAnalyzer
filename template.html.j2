@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+{#
+  SoC Perfetto Analyzer — HTML report skeleton v2
+  Encodes the v2 supplement: verdict-first sections (P1), mandatory chart
+  captions (D), issue objects (C.2), PMU tier badges (H), cross-refs (P6).
+  Data contract: see report_model.py. Charts arrive pre-rendered from
+  charts.py as {html, caption} pairs — the template never styles a chart.
+#}
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>{{ r.meta.scenario }} — SoC Perfetto Report</title>
+<style>
+  :root{
+    --bg:#0f1115; --surface:#171a21; --surface2:#1e222b; --line:#2a2f3a;
+    --txt:#e6e8ee; --txt2:#9aa2b1; --txt3:#6b7280;
+    --ok:#2dd4a7; --warn:#f0b429; --bad:#f0625b;
+    --na:#5b6270; --info:#5b9bf0; --accent:#7c83ff;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --radius:10px;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font-family:var(--sans);
+       font-size:15px;line-height:1.6;-webkit-font-smoothing:antialiased}
+  a{color:var(--info);text-decoration:none} a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:.88em;background:var(--surface2);
+       padding:1px 5px;border-radius:4px;color:#cdd3e0}
+  h1{font-size:22px;font-weight:600;margin:0}
+  h2{font-size:18px;font-weight:600;margin:0 0 4px}
+  h3{font-size:14px;font-weight:600;margin:14px 0 8px;color:var(--txt2)}
+  .wrap{display:flex;max-width:1180px;margin:0 auto}
+  nav{position:sticky;top:0;align-self:flex-start;width:190px;height:100vh;
+      padding:22px 14px;border-right:1px solid var(--line);flex:none;overflow:auto}
+  nav .brand{font-size:13px;color:var(--txt3);letter-spacing:.04em;
+             text-transform:uppercase;margin-bottom:14px}
+  nav a{display:block;color:var(--txt2);padding:6px 10px;border-radius:6px;
+        font-size:14px;margin-bottom:2px}
+  nav a:hover{background:var(--surface);color:var(--txt);text-decoration:none}
+  main{flex:1;min-width:0;padding:26px 34px 80px}
+  header.top{display:flex;justify-content:space-between;align-items:flex-end;
+             padding-bottom:18px;border-bottom:1px solid var(--line);margin-bottom:24px}
+  .sub{color:var(--txt2);font-size:13px;margin-top:4px}
+  section{margin:34px 0;scroll-margin-top:20px}
+  .sec-head{display:flex;align-items:center;gap:10px;margin-bottom:8px}
+  .sec-head .id{font-family:var(--mono);color:var(--txt3);font-size:13px}
+  /* P1: verdict line — the one-sentence answer that opens every section */
+  .verdict{font-size:14.5px;color:var(--txt);background:var(--surface);
+           border-left:3px solid var(--accent);padding:9px 14px;
+           border-radius:0 8px 8px 0;margin:6px 0 14px}
+  .note{background:var(--surface);border-left:3px solid var(--info);
+        padding:10px 14px;border-radius:0 8px 8px 0;color:var(--txt2);
+        font-size:13.5px;margin:12px 0}
+  .note.warn{border-left-color:var(--warn)}
+  .note.bad{border-left-color:var(--bad)}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;vertical-align:middle}
+  .s-ok{background:var(--ok)} .s-warn{background:var(--warn)}
+  .s-bad{background:var(--bad)} .s-na{background:var(--na)} .s-info{background:var(--info)}
+  .t-ok{color:var(--ok)} .t-warn{color:var(--warn)}
+  .t-bad{color:var(--bad)} .t-na{color:var(--na)} .t-info{color:var(--info)}
+  .pill{display:inline-block;font-size:11px;padding:2px 9px;border-radius:20px;
+        background:var(--surface2);color:var(--txt2)}
+  .pill.tier-measured{background:#11302a;color:var(--ok)}
+  .pill.tier-estimated{background:#3a2f12;color:var(--warn)}
+  .pill.tier-time_only{background:#22262f;color:var(--txt2)}
+  .grid{display:grid;gap:12px}
+  .badges{grid-template-columns:repeat(auto-fit,minmax(120px,1fr))}
+  .kpis{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+  .card{background:var(--surface);border:1px solid var(--line);
+        border-radius:var(--radius);padding:14px}
+  .card .lab{font-size:12px;color:var(--txt2)}
+  .card .big{font-size:22px;font-weight:600;margin-top:3px}
+  .badge{text-align:center}
+  .badge .hw{font-size:13px;color:var(--txt2);margin-bottom:4px}
+  .badge .st{font-size:12.5px;font-weight:600}
+  .badge .pc{font-size:20px;font-weight:600;margin-top:2px}
+  table{width:100%;border-collapse:collapse;font-size:13.5px;margin-top:6px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+  th{color:var(--txt2);font-weight:500;font-size:12px;
+     text-transform:uppercase;letter-spacing:.03em}
+  td.num,th.num{text-align:right;font-family:var(--mono)}
+  tr:hover td{background:var(--surface)}
+  .muted{color:var(--txt3)}
+  details{margin-top:8px} summary{cursor:pointer;color:var(--txt2);font-size:13.5px;padding:4px 0}
+  /* chart block: figure + MANDATORY caption (D common rule 3) */
+  .fig{margin:10px 0;background:var(--surface);border:1px solid var(--line);
+       border-radius:var(--radius);padding:10px 10px 4px}
+  .fig .cap{font-size:12px;color:var(--txt3);padding:2px 4px 6px;line-height:1.45}
+  /* issue object (C.2) */
+  .issue{display:flex;gap:10px;align-items:flex-start;padding:8px 0;
+         border-bottom:1px solid var(--line);font-size:13.5px}
+  .issue:last-child{border-bottom:0}
+  .issue .body{flex:1}
+  .issue .hl{color:var(--txt);font-weight:500}
+  .issue .meta{color:var(--txt3);font-size:12.5px;margin-top:2px}
+  .issue .xref{font-size:12px}
+  .foot{margin-top:50px;padding-top:16px;border-top:1px solid var(--line);
+        color:var(--txt3);font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <nav>
+    <div class="brand">SoC Trace</div>
+    <a href="#s0">§0 Dashboard</a>
+    <a href="#s1">§1 Capability</a>
+    <a href="#s2">§2 HW Usage</a>
+    <a href="#s3">§3 HW Portion</a>
+    <a href="#s4">§4 Runtime</a>
+    <a href="#s5">§5 Jitter</a>
+    <a href="#s6">§6 CPU Clock</a>
+    {% if r.contention %}<a href="#s7">§7 Contention</a>{% endif %}
+    <a href="#s8">§8 Appendix</a>
+  </nav>
+  <main>
+  <header class="top">
+    <div>
+      <h1>SoC Multimedia Trace Report</h1>
+      <div class="sub"><code>{{ r.meta.scenario }}</code> · {{ r.meta.device }} ·
+        {{ r.meta.soc }} · {{ r.meta.duration_s }}s · window {{ r.meta.window_s }}</div>
+    </div>
+    <div class="sub">generated {{ r.meta.generated }}</div>
+  </header>
+
+  {# ===================== §0 DASHBOARD ===================== #}
+  <section id="s0">
+    <div class="sec-head"><span class="id">§0</span><h2>Executive dashboard</h2></div>
+    <div class="grid badges">
+      {% for hw in r.hw_usage %}
+      <div class="card badge">
+        <div class="hw">{{ hw.name }}</div>
+        <div class="st t-{{ hw.status }}"><span class="dot s-{{ hw.status }}"></span> {{ hw.state_label }}</div>
+        <div class="pc {% if hw.status=='na' %}t-na{% endif %}">{{ hw.portion_label }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    <div class="grid kpis" style="margin-top:12px">
+      {% for k in r.kpis %}
+      <div class="card"><div class="lab">{{ k.label }}</div>
+        <div class="big">{{ k.value }} <span class="t-{{ k.status }}" style="font-size:14px">●</span></div>
+        {% if k.sub %}<div class="sub" style="margin-top:0">{{ k.sub }}</div>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    <div class="card" style="margin-top:12px">
+      <div class="lab" style="margin-bottom:4px">Top issues</div>
+      {% for it in r.top_issues %}
+      <div class="issue">
+        <span class="t-{{ it.severity }}" style="margin-top:2px">●</span>
+        <div class="body">
+          <div class="hl">{{ it.headline }}</div>
+          <div class="meta">
+            {% if it.comparison %}{{ it.comparison }}{% endif %}
+            {% if it.confidence %} · <span class="muted">{{ it.confidence }}</span>{% endif %}
+            {% if it.next_step %} · {{ it.next_step }}{% endif %}
+          </div>
+          {% if it.cross_ref %}<div class="xref"><a href="#{{ it.cross_ref_anchor }}">→ {{ it.cross_ref }}</a></div>{% endif %}
+        </div>
+      </div>
+      {% else %}<div class="muted">No issues above threshold.</div>{% endfor %}
+    </div>
+  </section>
+
+  {# ===================== §1 CAPABILITY ===================== #}
+  <section id="s1">
+    <div class="sec-head"><span class="id">§1</span><h2>Capability &amp; integrity audit</h2></div>
+    <div class="verdict">{{ r.verdicts.capability }}</div>
+    <h3>Data sources</h3>
+    <table><thead><tr><th>Source</th><th>Present</th><th>Affects</th></tr></thead><tbody>
+      {% for d in r.capability.sources %}
+      <tr><td><code>{{ d.name }}</code></td>
+        <td><span class="dot s-{{ d.status }}"></span> <span class="t-{{ d.status }}">{{ d.present }}</span></td>
+        <td class="muted">{{ d.affects }}</td></tr>
+      {% endfor %}
+    </tbody></table>
+    <h3>Integrity</h3>
+    <table><thead><tr><th>Item</th><th class="num">Value</th><th>Status</th></tr></thead><tbody>
+      {% for i in r.capability.integrity %}
+      <tr><td>{{ i.item }}</td><td class="num">{{ i.value }}</td><td><span class="dot s-{{ i.status }}"></span></td></tr>
+      {% endfor %}
+    </tbody></table>
+  </section>
+
+  {# ===================== §2 HW USAGE ===================== #}
+  <section id="s2">
+    <div class="sec-head"><span class="id">§2</span><h2>HW usage map</h2><span class="pill">R1</span></div>
+    <div class="verdict">{{ r.verdicts.hw }}</div>
+    {% if r.figures.hw_map %}<div class="fig">{{ r.figures.hw_map.html|safe }}
+      <div class="cap">{{ r.figures.hw_map.caption }}</div></div>{% endif %}
+    <details open><summary>Detection evidence</summary>
+    <table><thead><tr><th>HW</th><th>Verdict</th><th>Confidence</th>
+      <th class="num">IRQ</th><th class="num">Driver rt</th><th>Util</th><th>Freq</th></tr></thead><tbody>
+      {% for hw in r.hw_usage %}
+      <tr><td>{{ hw.name }}</td>
+        <td><span class="dot s-{{ hw.status }}"></span> <span class="t-{{ hw.status }}">{{ hw.state_label }}</span></td>
+        <td class="muted">{{ hw.confidence }}</td>
+        <td class="num">{{ hw.irq_count }}</td><td class="num">{{ hw.driver_runtime }}</td>
+        <td>{{ hw.util_counter }}</td><td>{{ hw.freq_counter }}</td></tr>
+      {% endfor %}
+    </tbody></table></details>
+    {% if r.hw_usage_note %}<div class="note warn">{{ r.hw_usage_note }}</div>{% endif %}
+  </section>
+
+  {# ===================== §3 HW SW PORTION ===================== #}
+  <section id="s3">
+    <div class="sec-head"><span class="id">§3</span><h2>HW SW portion</h2>
+      <span class="pill">R2</span>
+      <span class="pill tier-{{ r.portion.tier }}">{{ r.portion.tier_label }}</span></div>
+    <div class="verdict">{{ r.verdicts.portion }}</div>
+    <div class="note">Portion = <b>CPU-side SW cost</b> to drive each HW, not HW utilization.
+      Denominator: <code>{{ r.portion.denominator }}</code>.</div>
+    {% if r.figures.portion %}<div class="fig">{{ r.figures.portion.html|safe }}
+      <div class="cap">{{ r.figures.portion.caption }}</div></div>{% endif %}
+    <table><thead><tr><th>HW</th><th class="num">Time %</th>
+      <th class="num">Cycle %</th><th class="num">Inst %</th><th class="num">IPC</th></tr></thead><tbody>
+      {% for p in r.portion.rows %}
+      <tr><td>{{ p.name }}</td><td class="num">{{ p.time_pct }}</td>
+        <td class="num {% if p.pmu_na %}t-na{% endif %}">{{ p.cycle_pct }}</td>
+        <td class="num {% if p.pmu_na %}t-na{% endif %}">{{ p.inst_pct }}</td>
+        <td class="num {% if p.pmu_na %}t-na{% endif %}">{{ p.ipc }}</td></tr>
+      {% endfor %}
+    </tbody></table>
+    {% if r.portion.tier == 'time_only' %}
+      <div class="note warn">PMU absent → cycle/inst/IPC N/A. {{ r.portion.pbtx_hint }}</div>
+    {% elif r.portion.tier == 'estimated' %}
+      <div class="note warn">Cycle % is <b>estimated</b> from freq×runtime (megacycles). Instruction%/IPC require PMU and remain N/A.</div>
+    {% else %}
+      <div class="sub">* cycle/inst are PMU-sample estimations (multiplexing-scaled).</div>
+    {% endif %}
+  </section>
+
+  {# ===================== §4 RUNTIME ===================== #}
+  <section id="s4">
+    <div class="sec-head"><span class="id">§4</span><h2>Thread runtime profile</h2><span class="pill">R3a</span></div>
+    <div class="verdict">{{ r.verdicts.runtime }}</div>
+    {% if r.figures.runtime_box %}<div class="fig">{{ r.figures.runtime_box.html|safe }}
+      <div class="cap">{{ r.figures.runtime_box.caption }}</div></div>{% endif %}
+    <details><summary>Per-thread statistics ({{ r.runtime.rows|length }} threads) — µs</summary>
+    <table><thead><tr><th>Category</th><th>Thread</th><th class="num">N</th>
+      <th class="num">min</th><th class="num">avg</th><th class="num">p50</th>
+      <th class="num">p95</th><th class="num">p99</th><th class="num">max</th>
+      <th class="num">CoV</th><th>core b/m/L</th></tr></thead><tbody>
+      {% for t in r.runtime.rows %}
+      <tr><td class="muted">{{ t.category }}</td><td><code>{{ t.thread }}</code></td>
+        <td class="num">{{ t.n }}</td><td class="num">{{ t.min }}</td><td class="num">{{ t.avg }}</td>
+        <td class="num">{{ t.p50 }}</td><td class="num">{{ t.p95 }}</td><td class="num">{{ t.p99 }}</td>
+        <td class="num">{{ t.max }}</td><td class="num t-{{ t.cov_status }}">{{ t.cov }}</td>
+        <td class="muted">{{ t.core_mix }}</td></tr>
+      {% endfor %}
+    </tbody></table></details>
+  </section>
+
+  {# ===================== §5 JITTER ===================== #}
+  <section id="s5">
+    <div class="sec-head"><span class="id">§5</span><h2>Wakeup / scheduling jitter</h2><span class="pill">R3b</span></div>
+    {% if r.capability.has_waking %}
+      <div class="verdict">{{ r.verdicts.jitter }}</div>
+      {% if r.figures.wakeup_cdf %}<div class="fig">{{ r.figures.wakeup_cdf.html|safe }}
+        <div class="cap">{{ r.figures.wakeup_cdf.caption }}</div></div>{% endif %}
+      {% if r.figures.jitter_rank %}<div class="fig">{{ r.figures.jitter_rank.html|safe }}
+        <div class="cap">{{ r.figures.jitter_rank.caption }}</div></div>{% endif %}
+      {% if r.figures.interval_strip %}<div class="fig">{{ r.figures.interval_strip.html|safe }}
+        <div class="cap">{{ r.figures.interval_strip.caption }}</div></div>{% endif %}
+      <details><summary>Per-thread jitter metrics</summary>
+      <table><thead><tr><th>Thread</th><th class="num">p50</th><th class="num">p95</th>
+        <th class="num">p99</th><th class="num">CoV</th><th class="num">MAD</th>
+        <th class="num">interval σ</th><th>verdict</th><th>see</th></tr></thead><tbody>
+        {% for j in r.jitter.rows %}
+        <tr><td><code>{{ j.thread }}</code></td><td class="num">{{ j.p50 }}</td>
+          <td class="num">{{ j.p95 }}</td><td class="num t-{{ j.p99_status }}">{{ j.p99 }}</td>
+          <td class="num">{{ j.cov }}</td><td class="num">{{ j.mad }}</td>
+          <td class="num">{{ j.interval_sigma }}</td>
+          <td><span class="dot s-{{ j.status }}"></span></td>
+          <td>{% if j.cross_ref_anchor %}<a href="#{{ j.cross_ref_anchor }}" class="xref">{{ j.cross_ref }}</a>{% endif %}</td></tr>
+        {% endfor %}
+      </tbody></table></details>
+    {% else %}
+      <div class="note bad"><code>sched_waking</code> absent — wakeup latency &amp; jitter
+        unmeasurable (core R3 capability). {{ r.jitter.pbtx_hint }}</div>
+    {% endif %}
+  </section>
+
+  {# ===================== §6 CPU CLOCK ===================== #}
+  <section id="s6">
+    <div class="sec-head"><span class="id">§6</span><h2>CPU clock &amp; influence</h2><span class="pill">R4</span></div>
+    <div class="verdict">{{ r.verdicts.clock }}</div>
+    {% if r.figures.freq_ts %}<div class="fig">{{ r.figures.freq_ts.html|safe }}
+      <div class="cap">{{ r.figures.freq_ts.caption }}</div></div>{% endif %}
+    {% if r.figures.freq_residency %}<div class="fig">{{ r.figures.freq_residency.html|safe }}
+      <div class="cap">{{ r.figures.freq_residency.caption }}</div></div>{% endif %}
+    {% if r.figures.freq_corr %}<div class="fig">{{ r.figures.freq_corr.html|safe }}
+      <div class="cap">{{ r.figures.freq_corr.caption }}</div></div>{% endif %}
+    {% if r.clock.throttle_rows %}
+    <details open><summary>Clock-drop events</summary>
+    <table><thead><tr><th class="num">t (s)</th><th>cluster</th><th>drop</th>
+      <th>concurrent runtime Δ</th><th>thermal?</th></tr></thead><tbody>
+      {% for e in r.clock.throttle_rows %}
+      <tr><td class="num">{{ e.t }}</td><td>{{ e.cluster }}</td><td>{{ e.drop }}</td>
+        <td class="t-warn">{{ e.runtime_delta }}</td><td class="muted">{{ e.thermal }}</td></tr>
+      {% endfor %}
+    </tbody></table></details>{% endif %}
+  </section>
+
+  {# ===================== §7 CONTENTION ===================== #}
+  {% if r.contention %}
+  <section id="s7">
+    <div class="sec-head"><span class="id">§7</span><h2>Contention attribution</h2></div>
+    <div class="verdict">{{ r.verdicts.contention }}</div>
+    <h3>Top co-runners for <code>{{ r.contention.target }}</code></h3>
+    <table><thead><tr><th>Preemptor</th><th class="num">overlap</th><th class="num">count</th></tr></thead><tbody>
+      {% for c in r.contention.corunners %}
+      <tr><td><code>{{ c.name }}</code></td><td class="num t-{{ c.status }}">{{ c.overlap }}</td>
+        <td class="num">{{ c.count }}</td></tr>
+      {% endfor %}
+    </tbody></table>
+    {% if r.figures.waker_chain %}<div class="fig">{{ r.figures.waker_chain.html|safe }}
+      <div class="cap">{{ r.figures.waker_chain.caption }}</div></div>{% endif %}
+  </section>{% endif %}
+
+  {# ===================== §8 APPENDIX ===================== #}
+  <section id="s8">
+    <div class="sec-head"><span class="id">§8</span><h2>Appendix</h2></div>
+    {% if r.appendix.unmatched %}<h3>Unmatched keywords</h3>
+    <div>{% for k in r.appendix.unmatched %}<span class="pill" style="margin:2px">{{ k }}</span>{% endfor %}</div>{% endif %}
+    {% if r.appendix.ambiguous %}<h3>Ambiguous matches</h3>
+    <div>{% for k in r.appendix.ambiguous %}<span class="pill" style="margin:2px">{{ k }}</span>{% endfor %}</div>{% endif %}
+    <h3>Caveats</h3><ul class="sub">{% for c in r.appendix.caveats %}<li>{{ c }}</li>{% endfor %}</ul>
+    <h3>Versions</h3><table><tbody>
+      {% for k,v in r.appendix.versions.items() %}<tr><td class="muted">{{ k }}</td><td><code>{{ v }}</code></td></tr>{% endfor %}
+    </tbody></table>
+    <details><summary>Config dump</summary>
+      <pre style="background:var(--surface2);padding:12px;border-radius:8px;overflow:auto;font-size:12.5px"><code>{{ r.appendix.config_dump }}</code></pre>
+    </details>
+  </section>
+
+  <div class="foot">SoC Perfetto Analyzer · denominator: {{ r.portion.denominator }} ·
+    window: {{ r.meta.window_s }} · {{ r.meta.generated }}</div>
+  </main>
+</div>
+</body>
+</html>
