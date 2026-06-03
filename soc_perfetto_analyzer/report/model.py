@@ -20,9 +20,10 @@ def build_report_model(analysis: AnalysisResult, config: EventConfig) -> dict:
     portion_rows = _portion_rows(analysis)
     hw_usage = _hw_usage(analysis)
     clock_context = _clock_context(analysis)
+    clock_rows = _clock_rows(clock_context)
     figures = _figures(analysis, portion_rows, clock_context)
     top_issues = _issues(analysis, runtime_rows, jitter_rows)
-    verdicts = _verdicts(analysis, hw_usage, portion_rows, runtime_rows, jitter_rows, clock_context)
+    verdicts = _verdicts(analysis, hw_usage, portion_rows, runtime_rows, jitter_rows, clock_context, clock_rows)
     return {
         "meta": {
             "scenario": _scenario_name(config),
@@ -35,7 +36,7 @@ def build_report_model(analysis: AnalysisResult, config: EventConfig) -> dict:
         "verdicts": verdicts,
         "hw_usage": hw_usage,
         "hw_usage_note": _hw_note(analysis),
-        "kpis": _kpis(analysis, runtime_rows, jitter_rows),
+        "kpis": _kpis(analysis, runtime_rows, jitter_rows, clock_rows),
         "top_issues": top_issues,
         "capability": _capability(analysis),
         "figures": figures,
@@ -51,7 +52,7 @@ def build_report_model(analysis: AnalysisResult, config: EventConfig) -> dict:
             "pbtx_hint": "Re-capture with sched/sched_waking enabled.",
             "rows": jitter_rows,
         },
-        "clock": {"throttle_rows": _clock_rows(analysis), "overlap": clock_context["summary"]},
+        "clock": {"throttle_rows": clock_rows, "overlap": clock_context["summary"]},
         "contention": _contention(analysis),
         "appendix": {
             "unmatched": _unmatched(config, analysis),
@@ -331,7 +332,7 @@ def _issues(analysis: AnalysisResult, runtime_rows: list[dict], jitter_rows: lis
     return issues[:5]
 
 
-def _verdicts(analysis: AnalysisResult, hw_usage: list[dict], portion_rows: list[dict], runtime_rows: list[dict], jitter_rows: list[dict], clock_context: dict) -> dict:
+def _verdicts(analysis: AnalysisResult, hw_usage: list[dict], portion_rows: list[dict], runtime_rows: list[dict], jitter_rows: list[dict], clock_context: dict, clock_rows: list[dict]) -> dict:
     used = [row["name"] for row in hw_usage if row["status"] == "ok"]
     unknown = [row["name"] for row in hw_usage if row["status"] != "ok"]
     top_portion = max(portion_rows, key=lambda row: float(row["time_pct"]) if _is_number(row["time_pct"]) else 0.0)
@@ -346,7 +347,7 @@ def _verdicts(analysis: AnalysisResult, hw_usage: list[dict], portion_rows: list
         "portion": f"Multimedia SW = {sum(float(row['time_pct']) for row in portion_rows):.1f}% of configured multimedia CPU running time. Largest driver: {top_portion['name']} ({top_portion['time_pct']}%).",
         "runtime": runtime_verdict,
         "jitter": jitter_verdict,
-        "clock": _clock_verdict(analysis, clock_context),
+        "clock": _clock_verdict(clock_context, clock_rows),
         "contention": f"During {runtime_rows[0]['thread'] if runtime_rows else 'configured target'} outliers, co-runner attribution is candidate-only.",
     }
 
@@ -397,22 +398,25 @@ def _capability(analysis: AnalysisResult) -> dict:
     }
 
 
-def _kpis(analysis: AnalysisResult, runtime_rows: list[dict], jitter_rows: list[dict]) -> list[dict]:
+def _kpis(analysis: AnalysisResult, runtime_rows: list[dict], jitter_rows: list[dict], clock_rows: list[dict] | None = None) -> list[dict]:
+    clock_rows = clock_rows if clock_rows is not None else _clock_rows(_clock_context(analysis))
     worst_cov = max([float(row["cov"]) for row in runtime_rows if _is_number(row["cov"])] or [0.0])
     max_p99 = max([float(row["p99"]) for row in jitter_rows if _is_number(str(row["p99"]))] or [0.0])
     return [
         {"label": "Target threads", "value": f"{len(analysis.matched_threads)}", "status": "ok" if analysis.matched_threads else "warn", "sub": "matched in trace string audit"},
         {"label": "Worst runtime CoV", "value": f"{worst_cov:.2f}", "status": "warn" if worst_cov >= 0.5 else "ok", "sub": "sched running-burst distribution"},
         {"label": "Max wakeup p99", "value": f"{max_p99:.0f}µs" if max_p99 else "N/A", "status": "warn" if max_p99 else "na", "sub": "cluster baseline comparison in §5"},
-        {"label": "Clock-drop events", "value": f"{len(_clock_rows(analysis))}", "status": "warn" if _clock_rows(analysis) else "na", "sub": "requires cpu_frequency"},
+        {"label": "Clock-drop events", "value": f"{len(clock_rows)}", "status": "warn" if clock_rows else "na", "sub": "runtime/frequency overlap threshold"},
     ]
 
 
-def _clock_verdict(analysis: AnalysisResult, clock_context: dict) -> str:
+def _clock_verdict(clock_context: dict, clock_rows: list[dict]) -> str:
     sample_count = clock_context["summary"]["sample_count"]
+    if clock_rows:
+        return f"{len(clock_rows)} measured clock-drop events; {sample_count} runtime/frequency overlap samples measured."
     if sample_count:
-        return f"{len(_clock_rows(analysis))} measured clock-drop events; {sample_count} runtime/frequency overlap samples measured."
-    return f"{len(_clock_rows(analysis))} measured clock-drop events; runtime/frequency overlap is N/A: overlap join not implemented."
+        return f"0 measured clock-drop events; {sample_count} runtime/frequency overlap samples measured."
+    return "0 measured clock-drop events; runtime/frequency overlap is N/A: overlap join not implemented."
 
 
 def _clock_context(analysis: AnalysisResult) -> dict:
@@ -420,6 +424,7 @@ def _clock_context(analysis: AnalysisResult) -> dict:
     active_spans: list[tuple[float, float]] = []
     freq_ghz: list[float] = []
     runtime_us: list[float] = []
+    samples: list[dict] = []
     residency_seconds: dict[str, dict[str, float]] = {}
 
     for row in analysis.runtime_rows:
@@ -439,6 +444,14 @@ def _clock_context(analysis: AnalysisResult) -> dict:
                 continue
             freq_ghz.append(freq)
             runtime_us.append(duration_us)
+            samples.append(
+                {
+                    "t_s": start_s,
+                    "cluster": cluster,
+                    "freq_ghz": freq,
+                    "runtime_us": duration_us,
+                }
+            )
             cluster_buckets = residency_seconds.setdefault(cluster, {bucket: 0.0 for bucket in buckets})
             cluster_buckets[_freq_bucket(freq)] += duration_s
 
@@ -456,7 +469,8 @@ def _clock_context(analysis: AnalysisResult) -> dict:
         "freq_ghz": freq_ghz,
         "runtime_us": runtime_us,
         "correlation": _pearson(freq_ghz, runtime_us),
-        "summary": {"sample_count": len(freq_ghz), "measurement_state": "measured" if freq_ghz else "na"},
+        "samples": samples,
+        "summary": {"sample_count": len(freq_ghz), "drop_count": 0, "measurement_state": "measured" if freq_ghz else "na"},
     }
 
 
@@ -495,8 +509,43 @@ def _pearson(xs: list[float], ys: list[float]) -> float:
     return round(cov / (var_x * var_y) ** 0.5, 2)
 
 
-def _clock_rows(analysis: AnalysisResult) -> list[dict]:
-    return []
+def _clock_rows(clock_context: dict) -> list[dict]:
+    samples = clock_context.get("samples") or []
+    max_by_cluster: dict[str, float] = {}
+    for sample in samples:
+        cluster = sample["cluster"]
+        max_by_cluster[cluster] = max(max_by_cluster.get(cluster, 0.0), float(sample["freq_ghz"]))
+    high_runtime_by_cluster: dict[str, list[float]] = {}
+    for sample in samples:
+        cluster = sample["cluster"]
+        max_freq = max_by_cluster.get(cluster, 0.0)
+        if max_freq and float(sample["freq_ghz"]) >= max_freq * 0.95:
+            high_runtime_by_cluster.setdefault(cluster, []).append(float(sample["runtime_us"]))
+
+    rows: list[dict] = []
+    for sample in samples:
+        cluster = sample["cluster"]
+        max_freq = max_by_cluster.get(cluster, 0.0)
+        freq = float(sample["freq_ghz"])
+        if not max_freq or freq > max_freq * 0.85:
+            continue
+        baseline = percentile(high_runtime_by_cluster.get(cluster, []), 0.50)
+        if not baseline:
+            continue
+        delta_pct = (float(sample["runtime_us"]) - baseline) / baseline * 100.0
+        if delta_pct < 10.0:
+            continue
+        rows.append(
+            {
+                "t": f"{float(sample['t_s']):.3f}",
+                "cluster": cluster,
+                "drop": f"{max_freq:.1f}->{freq:.1f}G",
+                "runtime_delta": f"target {delta_pct:+.1f}% vs high-clock median",
+                "thermal": "N/A: thermal counter absent",
+            }
+        )
+    clock_context["summary"]["drop_count"] = len(rows)
+    return rows
 
 
 def _contention(analysis: AnalysisResult) -> dict:

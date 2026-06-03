@@ -220,3 +220,126 @@ def test_report_model_uses_measured_runtime_frequency_overlap(monkeypatch):
     assert calls["runtime_vs_freq"]["args"] == ([2.4, 1.8], [100_000.0, 200_000.0], -1.0)
     assert model["clock"]["overlap"]["sample_count"] == 2
     assert model["clock"]["overlap"]["measurement_state"] == "measured"
+
+
+def test_report_model_detects_clock_drop_rows_from_measured_overlap(monkeypatch):
+    import charts
+
+    for name in [
+        "portion_bar",
+        "runtime_box",
+        "wakeup_cdf",
+        "jitter_rank",
+        "interval_strip",
+        "freq_timeline",
+        "freq_residency",
+        "runtime_vs_freq",
+    ]:
+        monkeypatch.setattr(charts, name, lambda *args, **kwargs: ("<div>chart</div>", "caption with comparison"))
+    monkeypatch.setattr(charts, "reset_plotlyjs", lambda: None)
+
+    config = EventConfig(
+        path=Path("event_config.json"),
+        description="fixture",
+        config_version="1.0",
+        event_count=1,
+        thread_targets=[ThreadTarget(event_name="Camera", thread="CamX_ReqProc", category="camera_hal")],
+        raw={"events": []},
+    )
+    analysis = AnalysisResult(
+        trace_path=Path("sample.pftrace"),
+        trace_size_bytes=1024,
+        trace_duration_s=2.0,
+        capability=CapabilitySummary(
+            sched_switch=True,
+            sched_waking=False,
+            cpu_frequency=True,
+            irq_events=False,
+            hw_counters=False,
+            pmu=False,
+            trace_processor=True,
+            caveats=[],
+        ),
+        matched_threads=["CamX_ReqProc"],
+        runtime_rows=[
+            ThreadRuntime(
+                category="camera_hal",
+                thread="CamX_ReqProc",
+                samples_us=[100_000.0, 220_000.0, 110_000.0],
+                cpus=[7, 7, 7],
+                starts_s=[0.25, 0.75, 1.25],
+            )
+        ],
+        freq_series={"big": ([0.0, 0.5, 1.0], [2.4, 1.8, 2.4])},
+    )
+
+    model = build_report_model(analysis, config)
+
+    assert model["clock"]["overlap"]["drop_count"] == 1
+    assert model["clock"]["throttle_rows"] == [
+        {
+            "t": "0.750",
+            "cluster": "big",
+            "drop": "2.4->1.8G",
+            "runtime_delta": "target +109.5% vs high-clock median",
+            "thermal": "N/A: thermal counter absent",
+        }
+    ]
+    assert next(kpi for kpi in model["kpis"] if kpi["label"] == "Clock-drop events")["value"] == "1"
+
+
+def test_report_model_does_not_flag_low_clock_without_runtime_regression(monkeypatch):
+    import charts
+
+    for name in [
+        "portion_bar",
+        "runtime_box",
+        "wakeup_cdf",
+        "jitter_rank",
+        "interval_strip",
+        "freq_timeline",
+        "freq_residency",
+        "runtime_vs_freq",
+    ]:
+        monkeypatch.setattr(charts, name, lambda *args, **kwargs: ("<div>chart</div>", "caption with comparison"))
+    monkeypatch.setattr(charts, "reset_plotlyjs", lambda: None)
+
+    config = EventConfig(
+        path=Path("event_config.json"),
+        description="fixture",
+        config_version="1.0",
+        event_count=1,
+        thread_targets=[ThreadTarget(event_name="Camera", thread="CamX_ReqProc", category="camera_hal")],
+        raw={"events": []},
+    )
+    analysis = AnalysisResult(
+        trace_path=Path("sample.pftrace"),
+        trace_size_bytes=1024,
+        trace_duration_s=2.0,
+        capability=CapabilitySummary(
+            sched_switch=True,
+            sched_waking=False,
+            cpu_frequency=True,
+            irq_events=False,
+            hw_counters=False,
+            pmu=False,
+            trace_processor=True,
+            caveats=[],
+        ),
+        matched_threads=["CamX_ReqProc"],
+        runtime_rows=[
+            ThreadRuntime(
+                category="camera_hal",
+                thread="CamX_ReqProc",
+                samples_us=[100_000.0, 80_000.0, 110_000.0],
+                cpus=[7, 7, 7],
+                starts_s=[0.25, 0.75, 1.25],
+            )
+        ],
+        freq_series={"big": ([0.0, 0.5, 1.0], [2.4, 1.8, 2.4])},
+    )
+
+    model = build_report_model(analysis, config)
+
+    assert model["clock"]["overlap"]["drop_count"] == 0
+    assert model["clock"]["throttle_rows"] == []
