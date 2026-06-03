@@ -46,29 +46,37 @@ class AnalysisResult:
     trace_processor_version: str = "unavailable"
 
 
+class TraceProcessorAnalysisError(RuntimeError):
+    pass
+
+
 def analyze_trace(trace_path: Path | str, config: EventConfig) -> AnalysisResult:
     path = Path(trace_path)
     if not path.exists():
         raise FileNotFoundError(path)
-    tp_result = _try_trace_processor_analysis(path, config)
+    tp_error: str | None = None
+    try:
+        tp_result = _try_trace_processor_analysis(path, config)
+    except TraceProcessorAnalysisError as exc:
+        tp_result = None
+        tp_error = str(exc)
     if tp_result is not None:
         return tp_result
     payload = _read_prefix(path)
     hits = _scan_thread_strings(payload, [target.thread for target in config.thread_targets])
     matched = [thread for thread, count in hits.items() if count > 0]
-    capability = _detect_capabilities(payload)
-    runtime_rows = _synthetic_runtime_from_hits(config, hits) if matched else []
-    wakeups = _synthetic_wakeup_from_runtime(runtime_rows) if capability.sched_waking else {}
-    freq = _synthetic_freq_series() if capability.cpu_frequency else {}
+    tp_caveat = f"TraceProcessor analysis failed: {tp_error}" if tp_error else None
+    capability = _detect_capabilities(payload, trace_processor_caveat=tp_caveat)
     return AnalysisResult(
         trace_path=path,
         trace_size_bytes=path.stat().st_size,
         trace_duration_s=None,
         capability=capability,
         matched_threads=matched,
-        runtime_rows=runtime_rows,
-        wakeup_samples_by_cluster=wakeups,
-        freq_series=freq,
+        runtime_rows=[],
+        wakeup_samples_by_cluster={},
+        runnable_wait_by_thread={},
+        freq_series={},
         raw_string_hits=hits,
     )
 
@@ -114,8 +122,8 @@ def _try_trace_processor_analysis(path: Path, config: EventConfig) -> AnalysisRe
             raw_string_hits={target.thread: 1 if target.thread in matched else 0 for target in config.thread_targets},
             trace_processor_version=_perfetto_api_version(),
         )
-    except Exception:
-        return None
+    except Exception as exc:
+        raise TraceProcessorAnalysisError(str(exc)) from exc
     finally:
         if tp is not None:
             try:
@@ -289,7 +297,7 @@ def _scan_thread_strings(payload: bytes, threads: list[str]) -> dict[str, int]:
     return result
 
 
-def _detect_capabilities(payload: bytes) -> CapabilitySummary:
+def _detect_capabilities(payload: bytes, trace_processor_caveat: str | None = None) -> CapabilitySummary:
     text = _ascii_view(payload)
     sched_switch = "sched_switch" in text
     sched_waking = "sched_waking" in text or "sched_wakeup" in text
@@ -298,7 +306,8 @@ def _detect_capabilities(payload: bytes) -> CapabilitySummary:
     hw_counters = bool(re.search(r"gpu.*(util|busy)|kgsl.*busy|mali.*util", text, re.I | re.S))
     pmu = "linux.perf" in text or "HW_CPU_CYCLES" in text or "HW_INSTRUCTIONS" in text
     caveats: list[str] = []
-    caveats.append("TraceProcessor unavailable in this workspace; binary string inventory used for capability audit.")
+    caveats.append(trace_processor_caveat or "TraceProcessor unavailable in this workspace; binary string inventory used for capability audit.")
+    caveats.append("String inventory fallback does not produce runtime, wakeup, or frequency metrics.")
     if not pmu:
         caveats.append("linux.perf PMU samples absent or not discoverable; cycle/inst/IPC marked N/A.")
     if not sched_switch:

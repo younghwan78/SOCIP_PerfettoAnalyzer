@@ -28,6 +28,7 @@ def evaluate_phase9_quality_gate(model: dict[str, Any], html_path: Path | str | 
     _check_nav_contract(model, checks, failures)
     _check_hw_badges(model, checks, failures)
     _check_chart_contract(model, checks, failures)
+    _check_no_fabricated_metrics(model, checks, failures)
     if html_path is not None:
         _check_rendered_html(Path(html_path), checks, failures)
 
@@ -109,6 +110,25 @@ def _check_chart_contract(model: dict[str, Any], checks: list[str], failures: li
     present = {key for key, value in (model.get("figures") or {}).items() if value}
     missing = sorted(required - present)
     _record("all required chart slots are populated by report model", not missing, checks, failures, f"missing figures: {missing}")
+
+
+def _check_no_fabricated_metrics(model: dict[str, Any], checks: list[str], failures: list[str]) -> None:
+    clock_rows = model.get("clock", {}).get("throttle_rows") or []
+    bad_clock_rows = []
+    for row in clock_rows:
+        values = [str(value) for value in row.values()]
+        has_known_placeholder = any("target +15%" in value for value in values)
+        has_demo_drop = any(("2.4" in value and "1.8" in value) for value in values)
+        if str(row.get("thermal", "")).lower() == "inferred" and (has_known_placeholder or has_demo_drop):
+            bad_clock_rows.append(row)
+    bad_markers = [
+        marker
+        for marker in ("target +15% vs baseline", "r = -0.42")
+        if any(marker in text for text in _walk_strings(model))
+    ]
+    ok = not bad_clock_rows and not bad_markers
+    detail = f"clock_rows={len(bad_clock_rows)}, markers={bad_markers[:3]}"
+    _record("fabricated clock/frequency metrics are absent", ok, checks, failures, detail)
 
 
 def _check_rendered_html(path: Path, checks: list[str], failures: list[str]) -> None:

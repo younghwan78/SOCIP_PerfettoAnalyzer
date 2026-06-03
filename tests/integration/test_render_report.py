@@ -23,3 +23,7 @@ def test_render_report_preserves_sample_structure_and_single_file(tmp_path):
     assert "N/A: linux.perf absent" in html
     assert "plotly" in html.lower() or "no data:" in html
     assert html.count('class="cap"') >= 7
+    assert "Clock-drop events" in html
+    assert "N/A: runtime/frequency overlap not implemented" in html
+    assert "target +15% vs baseline" not in html
+    assert "r = -0.42" not in html

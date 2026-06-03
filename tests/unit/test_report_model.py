@@ -84,3 +84,71 @@ def test_report_model_builds_verdicts_issues_and_uses_chart_builders(monkeypatch
         "freq_residency",
         "runtime_vs_freq",
     }
+
+
+def test_report_model_does_not_fabricate_clock_or_frequency_metrics(monkeypatch):
+    calls = {}
+
+    def record(name):
+        def _builder(*args, **kwargs):
+            calls[name] = {"args": args, "kwargs": kwargs}
+            return f"<div>{name}</div>", f"{name} caption with comparison"
+        return _builder
+
+    import charts
+
+    for name in [
+        "portion_bar",
+        "runtime_box",
+        "wakeup_cdf",
+        "jitter_rank",
+        "interval_strip",
+        "freq_timeline",
+        "freq_residency",
+        "runtime_vs_freq",
+    ]:
+        monkeypatch.setattr(charts, name, record(name))
+    monkeypatch.setattr(charts, "reset_plotlyjs", lambda: None)
+
+    config = EventConfig(
+        path=Path("event_config.json"),
+        description="fixture",
+        config_version="1.0",
+        event_count=1,
+        thread_targets=[ThreadTarget(event_name="Camera", thread="CamX_ReqProc", category="camera_hal")],
+        raw={"events": []},
+    )
+    analysis = AnalysisResult(
+        trace_path=Path("sample.pftrace"),
+        trace_size_bytes=1024,
+        trace_duration_s=1.0,
+        capability=CapabilitySummary(
+            sched_switch=True,
+            sched_waking=False,
+            cpu_frequency=True,
+            irq_events=False,
+            hw_counters=False,
+            pmu=False,
+            trace_processor=True,
+            caveats=[],
+        ),
+        matched_threads=["CamX_ReqProc"],
+        runtime_rows=[
+            ThreadRuntime(
+                category="camera_hal",
+                thread="CamX_ReqProc",
+                samples_us=[1000.0, 1500.0, 2500.0],
+                cpus=[0, 4, 7],
+            )
+        ],
+        freq_series={"big": ([0.0, 1.0], [2.4, 1.8])},
+    )
+
+    model = build_report_model(analysis, config)
+
+    assert calls["freq_timeline"]["kwargs"]["active_spans"] == []
+    assert calls["freq_residency"]["args"] == ([], [], {})
+    assert calls["runtime_vs_freq"]["args"] == ([], [], 0.0)
+    assert model["clock"]["throttle_rows"] == []
+    assert next(kpi for kpi in model["kpis"] if kpi["label"] == "Clock-drop events")["value"] == "0"
+    assert model["capability"]["has_waking"] is False

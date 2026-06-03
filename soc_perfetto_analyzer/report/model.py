@@ -91,9 +91,9 @@ def _figures(analysis: AnalysisResult, portion_rows: list[dict]) -> dict:
         "wakeup_cdf": charts.wakeup_cdf(analysis.wakeup_samples_by_cluster),
         "jitter_rank": charts.jitter_rank(jitter_rank_rows),
         "interval_strip": charts.interval_strip(interval_samples, target_ms=33.3, thread=first_runtime),
-        "freq_ts": charts.freq_timeline(freq, active_spans=[(0.5, 1.0)] if freq else []),
-        "freq_residency": charts.freq_residency(["big"], ["low", "mid", "high"], {"big": [20, 50, 30]} if freq else {}),
-        "freq_corr": charts.runtime_vs_freq([1.8, 2.0, 2.4] if freq else [], [2200, 1800, 1400] if freq else [], r_value=-0.42),
+        "freq_ts": charts.freq_timeline(freq, active_spans=[]),
+        "freq_residency": charts.freq_residency([], [], {}),
+        "freq_corr": charts.runtime_vs_freq([], [], 0.0),
     }
     figures = {key: _figure_dict(value, key) for key, value in figure_values.items()}
     figures["hw_map"] = {"html": _hw_map_svg(_hw_usage(analysis)), "caption": "HW blocks are colored by detected evidence; grey means no direct evidence in the current trace audit."}
@@ -345,7 +345,7 @@ def _verdicts(analysis: AnalysisResult, hw_usage: list[dict], portion_rows: list
         "portion": f"Multimedia SW = {sum(float(row['time_pct']) for row in portion_rows):.1f}% of configured multimedia CPU running time. Largest driver: {top_portion['name']} ({top_portion['time_pct']}%).",
         "runtime": runtime_verdict,
         "jitter": jitter_verdict,
-        "clock": f"{len(_clock_rows(analysis))} clock-drop events; {1 if analysis.freq_series and analysis.runtime_rows else 0} overlap multimedia runtime outliers.",
+        "clock": f"{len(_clock_rows(analysis))} measured clock-drop events; runtime/frequency overlap is N/A: overlap join not implemented.",
         "contention": f"During {runtime_rows[0]['thread'] if runtime_rows else 'configured target'} outliers, co-runner attribution is candidate-only.",
     }
 
@@ -377,7 +377,7 @@ def _capability(analysis: AnalysisResult) -> dict:
         ("linux.perf (PMU)", analysis.capability.pmu, "R2 cycle/inst"),
     ]
     return {
-        "has_waking": True,
+        "has_waking": analysis.capability.sched_waking and bool(analysis.runnable_wait_by_thread),
         "sources": [
             {
                 "name": name,
@@ -408,9 +408,7 @@ def _kpis(analysis: AnalysisResult, runtime_rows: list[dict], jitter_rows: list[
 
 
 def _clock_rows(analysis: AnalysisResult) -> list[dict]:
-    if not analysis.freq_series:
-        return []
-    return [{"t": "0.5", "cluster": "big", "drop": "2.4→1.8G", "runtime_delta": "target +15% vs baseline", "thermal": "inferred"}]
+    return []
 
 
 def _contention(analysis: AnalysisResult) -> dict:

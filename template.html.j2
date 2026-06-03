@@ -299,7 +299,12 @@
       <tr><td class="num">{{ e.t }}</td><td>{{ e.cluster }}</td><td>{{ e.drop }}</td>
         <td class="t-warn">{{ e.runtime_delta }}</td><td class="muted">{{ e.thermal }}</td></tr>
       {% endfor %}
-    </tbody></table></details>{% endif %}
+    </tbody></table></details>
+    {% else %}
+    <details open><summary>Clock-drop events</summary>
+      <div class="note">N/A: runtime/frequency overlap not implemented. CPU frequency charts are retained, but no clock-drop rows are reported as measured evidence.</div>
+    </details>
+    {% endif %}
   </section>
 
   {# ===================== §7 CONTENTION ===================== #}
