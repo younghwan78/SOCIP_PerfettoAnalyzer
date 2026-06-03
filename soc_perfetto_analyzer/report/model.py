@@ -19,9 +19,10 @@ def build_report_model(analysis: AnalysisResult, config: EventConfig) -> dict:
     jitter_rows = _jitter_rows(analysis)
     portion_rows = _portion_rows(analysis)
     hw_usage = _hw_usage(analysis)
-    figures = _figures(analysis, portion_rows)
+    clock_context = _clock_context(analysis)
+    figures = _figures(analysis, portion_rows, clock_context)
     top_issues = _issues(analysis, runtime_rows, jitter_rows)
-    verdicts = _verdicts(analysis, hw_usage, portion_rows, runtime_rows, jitter_rows)
+    verdicts = _verdicts(analysis, hw_usage, portion_rows, runtime_rows, jitter_rows, clock_context)
     return {
         "meta": {
             "scenario": _scenario_name(config),
@@ -50,7 +51,7 @@ def build_report_model(analysis: AnalysisResult, config: EventConfig) -> dict:
             "pbtx_hint": "Re-capture with sched/sched_waking enabled.",
             "rows": jitter_rows,
         },
-        "clock": {"throttle_rows": _clock_rows(analysis)},
+        "clock": {"throttle_rows": _clock_rows(analysis), "overlap": clock_context["summary"]},
         "contention": _contention(analysis),
         "appendix": {
             "unmatched": _unmatched(config, analysis),
@@ -67,7 +68,7 @@ def build_report_model(analysis: AnalysisResult, config: EventConfig) -> dict:
     }
 
 
-def _figures(analysis: AnalysisResult, portion_rows: list[dict]) -> dict:
+def _figures(analysis: AnalysisResult, portion_rows: list[dict], clock_context: dict) -> dict:
     portion_data = [
         {"name": row["name"], "time_pct": float(row["time_pct"])}
         for row in portion_rows
@@ -91,9 +92,9 @@ def _figures(analysis: AnalysisResult, portion_rows: list[dict]) -> dict:
         "wakeup_cdf": charts.wakeup_cdf(analysis.wakeup_samples_by_cluster),
         "jitter_rank": charts.jitter_rank(jitter_rank_rows),
         "interval_strip": charts.interval_strip(interval_samples, target_ms=33.3, thread=first_runtime),
-        "freq_ts": charts.freq_timeline(freq, active_spans=[]),
-        "freq_residency": charts.freq_residency([], [], {}),
-        "freq_corr": charts.runtime_vs_freq([], [], 0.0),
+        "freq_ts": charts.freq_timeline(freq, active_spans=clock_context["active_spans"]),
+        "freq_residency": charts.freq_residency(clock_context["residency_clusters"], clock_context["residency_buckets"], clock_context["residency"]),
+        "freq_corr": charts.runtime_vs_freq(clock_context["freq_ghz"], clock_context["runtime_us"], clock_context["correlation"]),
     }
     figures = {key: _figure_dict(value, key) for key, value in figure_values.items()}
     figures["hw_map"] = {"html": _hw_map_svg(_hw_usage(analysis)), "caption": "HW blocks are colored by detected evidence; grey means no direct evidence in the current trace audit."}
@@ -330,7 +331,7 @@ def _issues(analysis: AnalysisResult, runtime_rows: list[dict], jitter_rows: lis
     return issues[:5]
 
 
-def _verdicts(analysis: AnalysisResult, hw_usage: list[dict], portion_rows: list[dict], runtime_rows: list[dict], jitter_rows: list[dict]) -> dict:
+def _verdicts(analysis: AnalysisResult, hw_usage: list[dict], portion_rows: list[dict], runtime_rows: list[dict], jitter_rows: list[dict], clock_context: dict) -> dict:
     used = [row["name"] for row in hw_usage if row["status"] == "ok"]
     unknown = [row["name"] for row in hw_usage if row["status"] != "ok"]
     top_portion = max(portion_rows, key=lambda row: float(row["time_pct"]) if _is_number(row["time_pct"]) else 0.0)
@@ -345,7 +346,7 @@ def _verdicts(analysis: AnalysisResult, hw_usage: list[dict], portion_rows: list
         "portion": f"Multimedia SW = {sum(float(row['time_pct']) for row in portion_rows):.1f}% of configured multimedia CPU running time. Largest driver: {top_portion['name']} ({top_portion['time_pct']}%).",
         "runtime": runtime_verdict,
         "jitter": jitter_verdict,
-        "clock": f"{len(_clock_rows(analysis))} measured clock-drop events; runtime/frequency overlap is N/A: overlap join not implemented.",
+        "clock": _clock_verdict(analysis, clock_context),
         "contention": f"During {runtime_rows[0]['thread'] if runtime_rows else 'configured target'} outliers, co-runner attribution is candidate-only.",
     }
 
@@ -405,6 +406,93 @@ def _kpis(analysis: AnalysisResult, runtime_rows: list[dict], jitter_rows: list[
         {"label": "Max wakeup p99", "value": f"{max_p99:.0f}µs" if max_p99 else "N/A", "status": "warn" if max_p99 else "na", "sub": "cluster baseline comparison in §5"},
         {"label": "Clock-drop events", "value": f"{len(_clock_rows(analysis))}", "status": "warn" if _clock_rows(analysis) else "na", "sub": "requires cpu_frequency"},
     ]
+
+
+def _clock_verdict(analysis: AnalysisResult, clock_context: dict) -> str:
+    sample_count = clock_context["summary"]["sample_count"]
+    if sample_count:
+        return f"{len(_clock_rows(analysis))} measured clock-drop events; {sample_count} runtime/frequency overlap samples measured."
+    return f"{len(_clock_rows(analysis))} measured clock-drop events; runtime/frequency overlap is N/A: overlap join not implemented."
+
+
+def _clock_context(analysis: AnalysisResult) -> dict:
+    buckets = ["low", "mid", "high"]
+    active_spans: list[tuple[float, float]] = []
+    freq_ghz: list[float] = []
+    runtime_us: list[float] = []
+    residency_seconds: dict[str, dict[str, float]] = {}
+
+    for row in analysis.runtime_rows:
+        for idx, start_s in enumerate(row.starts_s):
+            if idx >= len(row.samples_us):
+                continue
+            duration_us = row.samples_us[idx]
+            duration_s = duration_us / 1_000_000.0
+            if duration_s <= 0:
+                continue
+            active_spans.append((round(start_s, 6), round(start_s + duration_s, 6)))
+            if idx >= len(row.cpus):
+                continue
+            cluster = _cpu_cluster(row.cpus[idx])
+            freq = _frequency_at(analysis.freq_series.get(cluster), start_s)
+            if freq is None:
+                continue
+            freq_ghz.append(freq)
+            runtime_us.append(duration_us)
+            cluster_buckets = residency_seconds.setdefault(cluster, {bucket: 0.0 for bucket in buckets})
+            cluster_buckets[_freq_bucket(freq)] += duration_s
+
+    residency = {}
+    for cluster, values in residency_seconds.items():
+        total = sum(values.values())
+        if total:
+            residency[cluster] = [round(values[bucket] / total * 100.0, 1) for bucket in buckets]
+    clusters = [cluster for cluster in ("little", "mid", "big") if cluster in residency]
+    return {
+        "active_spans": active_spans,
+        "residency_clusters": clusters,
+        "residency_buckets": buckets if residency else [],
+        "residency": {cluster: residency[cluster] for cluster in clusters},
+        "freq_ghz": freq_ghz,
+        "runtime_us": runtime_us,
+        "correlation": _pearson(freq_ghz, runtime_us),
+        "summary": {"sample_count": len(freq_ghz), "measurement_state": "measured" if freq_ghz else "na"},
+    }
+
+
+def _frequency_at(series: tuple[list[float], list[float]] | None, start_s: float) -> float | None:
+    if not series:
+        return None
+    ts, values = series
+    if not ts or not values:
+        return None
+    selected = values[0]
+    for time_s, value in zip(ts, values):
+        if time_s > start_s:
+            break
+        selected = value
+    return selected
+
+
+def _freq_bucket(freq_ghz: float) -> str:
+    if freq_ghz < 1.5:
+        return "low"
+    if freq_ghz < 2.2:
+        return "mid"
+    return "high"
+
+
+def _pearson(xs: list[float], ys: list[float]) -> float:
+    if len(xs) < 2 or len(xs) != len(ys):
+        return 0.0
+    avg_x = sum(xs) / len(xs)
+    avg_y = sum(ys) / len(ys)
+    cov = sum((x - avg_x) * (y - avg_y) for x, y in zip(xs, ys))
+    var_x = sum((x - avg_x) ** 2 for x in xs)
+    var_y = sum((y - avg_y) ** 2 for y in ys)
+    if not var_x or not var_y:
+        return 0.0
+    return round(cov / (var_x * var_y) ** 0.5, 2)
 
 
 def _clock_rows(analysis: AnalysisResult) -> list[dict]:
@@ -495,6 +583,14 @@ def _core_mix(cpus: list[int]) -> str:
     big = sum(1 for cpu in cpus if cpu >= 7)
     total = max(1, len(cpus))
     return f"{little * 100 // total}/{mid * 100 // total}/{big * 100 // total}"
+
+
+def _cpu_cluster(cpu: int) -> str:
+    if cpu <= 3:
+        return "little"
+    if cpu <= 6:
+        return "mid"
+    return "big"
 
 
 def _duration_label(analysis: AnalysisResult) -> str:

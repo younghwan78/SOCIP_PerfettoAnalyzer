@@ -302,7 +302,11 @@
     </tbody></table></details>
     {% else %}
     <details open><summary>Clock-drop events</summary>
+      {% if r.clock.overlap.measurement_state == "measured" %}
+      <div class="note">{{ r.clock.overlap.sample_count }} runtime/frequency overlap samples measured. No clock-drop rows are reported yet; drop detection is a separate threshold step.</div>
+      {% else %}
       <div class="note">N/A: runtime/frequency overlap not implemented. CPU frequency charts are retained, but no clock-drop rows are reported as measured evidence.</div>
+      {% endif %}
     </details>
     {% endif %}
   </section>

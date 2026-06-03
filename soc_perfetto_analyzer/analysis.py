@@ -29,6 +29,7 @@ class ThreadRuntime:
     thread: str
     samples_us: list[float]
     cpus: list[int] = field(default_factory=list)
+    starts_s: list[float] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -93,7 +94,7 @@ def _try_trace_processor_analysis(path: Path, config: EventConfig) -> AnalysisRe
         counts = _table_counts(tp)
         pmu_count = _scalar(tp, "select count(*) as c from counter_track where lower(name) like '%cycles%' or lower(name) like '%instructions%' or lower(name) like '%linux.perf%'", "c")
         hw_counter_count = _scalar(tp, "select count(*) as c from counter_track where lower(name) glob '*gpu*util*' or lower(name) glob '*kgsl*busy*' or lower(name) glob '*mali*util*'", "c")
-        matched, runtime_rows, runnable_by_cluster, runnable_by_thread = _query_target_runtime(tp, config)
+        matched, runtime_rows, runnable_by_cluster, runnable_by_thread = _query_target_runtime(tp, config, start_ns)
         freq_series = _query_frequency_series(tp, start_ns)
         caveats = []
         if not pmu_count:
@@ -199,7 +200,7 @@ def _table_counts(tp: Any) -> dict[str, int]:
     }
 
 
-def _query_target_runtime(tp: Any, config: EventConfig) -> tuple[list[str], list[ThreadRuntime], dict[str, list[float]], dict[str, list[float]]]:
+def _query_target_runtime(tp: Any, config: EventConfig, start_ns: int) -> tuple[list[str], list[ThreadRuntime], dict[str, list[float]], dict[str, list[float]]]:
     matched: list[str] = []
     runtime_rows: list[ThreadRuntime] = []
     runnable_by_cluster: dict[str, list[float]] = {}
@@ -210,13 +211,14 @@ def _query_target_runtime(tp: Any, config: EventConfig) -> tuple[list[str], list
             continue
         utids = [int(row.utid) for row in thread_rows]
         utid_sql = ",".join(str(utid) for utid in utids)
-        sched_rows = list(tp.query(f"select dur, cpu from sched where utid in ({utid_sql}) and dur > 0 order by ts"))
+        sched_rows = list(tp.query(f"select ts, dur, cpu from sched where utid in ({utid_sql}) and dur > 0 order by ts"))
         if not sched_rows:
             continue
         matched.append(target.thread)
         samples_us = [float(row.dur) / 1000.0 for row in sched_rows]
         cpus = [int(row.cpu) for row in sched_rows if row.cpu is not None]
-        runtime_rows.append(ThreadRuntime(target.category, target.thread, samples_us, cpus))
+        starts_s = [(int(row.ts) - start_ns) / 1_000_000_000 for row in sched_rows]
+        runtime_rows.append(ThreadRuntime(target.category, target.thread, samples_us, cpus, starts_s))
         cluster = _dominant_cluster(cpus)
         runnable_rows = list(
             tp.query(

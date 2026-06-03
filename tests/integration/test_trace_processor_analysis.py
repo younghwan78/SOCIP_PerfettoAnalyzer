@@ -19,6 +19,7 @@ def test_analyze_trace_uses_trace_processor_sql_for_sample_trace():
     assert len(analysis.runtime_rows) == 1
     assert analysis.runtime_rows[0].thread == "Uni:PERSONAL_IM"
     assert len(analysis.runtime_rows[0].samples_us) == 229
+    assert len(analysis.runtime_rows[0].starts_s) == 229
     assert max(analysis.runtime_rows[0].samples_us) > 1000.0
     assert analysis.wakeup_samples_by_cluster
     assert analysis.freq_series
