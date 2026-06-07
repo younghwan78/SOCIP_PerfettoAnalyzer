@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from soc_perfetto_analyzer.config import load_event_config
+from soc_perfetto_analyzer.config import load_cpu_topology_config, load_event_config
 
 
 def test_legacy_event_config_extracts_task_threads():
@@ -23,3 +23,64 @@ def test_event_config_yaml_path_is_supported():
 
     assert config.config_version == "1.0"
     assert any(target.thread == "WNC-IspRequest" for target in config.thread_targets)
+    assert config.cpu_topology.clusters == []
+
+
+def test_event_config_extracts_optional_cpu_topology(tmp_path):
+    config_path = tmp_path / "event_config_with_topology.yaml"
+    config_path.write_text(
+        """
+events:
+  - event_name: CameraTask
+    event_type: Task
+    start_condition:
+      event: sched_switch
+      match_field: next_comm
+      match_value: CameraThread
+cpu_topology:
+  source: project_config
+  clusters:
+    - name: little
+      cpus: [0, 1]
+      role: efficiency
+      freq_hint_ghz:
+        min: 0.3
+        max: 1.4
+    - name: mid
+      cpus: [2, 3, 4, 5, 6]
+      role: performance
+      freq_hint_ghz:
+        min: 0.5
+        max: 2.6
+""",
+        encoding="utf-8",
+    )
+
+    config = load_event_config(config_path)
+
+    assert config.cpu_topology.source == "project_config"
+    assert [cluster.name for cluster in config.cpu_topology.clusters] == ["little", "mid"]
+    assert config.cpu_topology.clusters[0].cpus == [0, 1]
+    assert config.cpu_topology.clusters[0].role == "efficiency"
+    assert config.cpu_topology.clusters[0].freq_hint_ghz == (0.3, 1.4)
+    assert config.cpu_topology.cluster_for_cpu(5) == "mid"
+
+
+def test_load_cpu_topology_config_accepts_topology_only_file(tmp_path):
+    topology_path = tmp_path / "topology.yaml"
+    topology_path.write_text(
+        """
+source: override_file
+clusters:
+  - name: little
+    cpus: [0, 1, 2, 3]
+  - name: big
+    cpus: [4, 5, 6, 7]
+""",
+        encoding="utf-8",
+    )
+
+    topology = load_cpu_topology_config(topology_path)
+
+    assert topology.source == "override_file"
+    assert topology.cluster_for_cpu(6) == "big"

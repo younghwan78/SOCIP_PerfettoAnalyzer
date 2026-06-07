@@ -33,6 +33,81 @@ class ThreadRuntime:
 
 
 @dataclass(frozen=True)
+class CpuClusterInfo:
+    name: str
+    cpus: list[int]
+    min_freq_ghz: float | None = None
+    max_freq_ghz: float | None = None
+    source: str = "fallback"
+
+
+@dataclass(frozen=True)
+class SchedRun:
+    event_name: str
+    category: str
+    thread: str
+    utid: int
+    ts_s: float
+    dur_us: float
+    cpu: int
+    cluster: str
+    freq_ghz: float | None
+    is_target: bool
+
+
+@dataclass(frozen=True)
+class ClockRampWindow:
+    cluster: str
+    start_s: float
+    peak_s: float
+    end_s: float
+    baseline_ghz: float
+    peak_ghz: float
+    delta_pct: float
+    target_runtime_us: float
+    non_target_runtime_us: float
+    new_non_target_threads: int
+    target_migrations_into_cluster: int
+    periodicity_score: float
+    attribution: str
+    confidence: str
+    evidence: list[str]
+    top_corunners: list[dict[str, str | float]]
+
+
+@dataclass(frozen=True)
+class PmuCapability:
+    has_perf_samples: bool
+    has_callstacks: bool
+    has_cycles: bool
+    has_instructions: bool
+    classifier_events: list[str] = field(default_factory=list)
+    caveats: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class FunctionHotspot:
+    thread: str
+    function: str
+    mapping: str
+    source_file: str | None
+    line_number: int | None
+    self_cycles: float | None
+    cumulative_cycles: float | None
+    self_samples: int
+    cumulative_samples: int
+    sample_pct: float
+    ipc: float | None
+    cache_miss_pct: float | None
+    frontend_stall_pct: float | None
+    backend_stall_pct: float | None
+    wait_pct: float | None
+    classification: str
+    confidence: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class AnalysisResult:
     trace_path: Path
     trace_size_bytes: int
@@ -43,6 +118,11 @@ class AnalysisResult:
     wakeup_samples_by_cluster: dict[str, list[float]] = field(default_factory=dict)
     runnable_wait_by_thread: dict[str, list[float]] = field(default_factory=dict)
     freq_series: dict[str, tuple[list[float], list[float]]] = field(default_factory=dict)
+    cpu_clusters: list[CpuClusterInfo] = field(default_factory=list)
+    target_runs: list[SchedRun] = field(default_factory=list)
+    clock_ramp_windows: list[ClockRampWindow] = field(default_factory=list)
+    pmu_capability: PmuCapability | None = None
+    function_hotspots_by_thread: dict[str, list[FunctionHotspot]] = field(default_factory=dict)
     raw_string_hits: dict[str, int] = field(default_factory=dict)
     trace_processor_version: str = "unavailable"
 
@@ -93,9 +173,15 @@ def _try_trace_processor_analysis(path: Path, config: EventConfig) -> AnalysisRe
         start_ns, end_ns = _trace_bounds(tp)
         counts = _table_counts(tp)
         pmu_count = _scalar(tp, "select count(*) as c from counter_track where lower(name) like '%cycles%' or lower(name) like '%instructions%' or lower(name) like '%linux.perf%'", "c")
+        pmu_capability = _query_pmu_capability(tp, pmu_count)
         hw_counter_count = _scalar(tp, "select count(*) as c from counter_track where lower(name) glob '*gpu*util*' or lower(name) glob '*kgsl*busy*' or lower(name) glob '*mali*util*'", "c")
-        matched, runtime_rows, runnable_by_cluster, runnable_by_thread = _query_target_runtime(tp, config, start_ns)
-        freq_series = _query_frequency_series(tp, start_ns)
+        cpu_clusters = _configured_cpu_clusters(config) or _query_frequency_clusters(tp)
+        freq_series = _query_frequency_series(tp, start_ns, cpu_clusters)
+        matched, runtime_rows, runnable_by_cluster, runnable_by_thread = _query_target_runtime(tp, config, start_ns, cpu_clusters)
+        sched_runs = _query_sched_runs(tp, config, start_ns, cpu_clusters, freq_series)
+        target_runs = [run for run in sched_runs if run.is_target]
+        clock_ramp_windows = _detect_clock_ramp_windows(freq_series, sched_runs)
+        function_hotspots = _query_function_hotspots(tp, config, pmu_capability)
         caveats = []
         if not pmu_count:
             caveats.append("linux.perf PMU samples absent or incomplete; cycle/inst/IPC marked N/A.")
@@ -120,6 +206,11 @@ def _try_trace_processor_analysis(path: Path, config: EventConfig) -> AnalysisRe
             wakeup_samples_by_cluster=runnable_by_cluster,
             runnable_wait_by_thread=runnable_by_thread,
             freq_series=freq_series,
+            cpu_clusters=cpu_clusters,
+            target_runs=target_runs,
+            clock_ramp_windows=clock_ramp_windows,
+            pmu_capability=pmu_capability,
+            function_hotspots_by_thread=function_hotspots,
             raw_string_hits={target.thread: 1 if target.thread in matched else 0 for target in config.thread_targets},
             trace_processor_version=_perfetto_api_version(),
         )
@@ -200,7 +291,7 @@ def _table_counts(tp: Any) -> dict[str, int]:
     }
 
 
-def _query_target_runtime(tp: Any, config: EventConfig, start_ns: int) -> tuple[list[str], list[ThreadRuntime], dict[str, list[float]], dict[str, list[float]]]:
+def _query_target_runtime(tp: Any, config: EventConfig, start_ns: int, cpu_clusters: list[CpuClusterInfo] | None = None) -> tuple[list[str], list[ThreadRuntime], dict[str, list[float]], dict[str, list[float]]]:
     matched: list[str] = []
     runtime_rows: list[ThreadRuntime] = []
     runnable_by_cluster: dict[str, list[float]] = {}
@@ -219,7 +310,7 @@ def _query_target_runtime(tp: Any, config: EventConfig, start_ns: int) -> tuple[
         cpus = [int(row.cpu) for row in sched_rows if row.cpu is not None]
         starts_s = [(int(row.ts) - start_ns) / 1_000_000_000 for row in sched_rows]
         runtime_rows.append(ThreadRuntime(target.category, target.thread, samples_us, cpus, starts_s))
-        cluster = _dominant_cluster(cpus)
+        cluster = _dominant_cluster(cpus, cpu_clusters or [])
         runnable_rows = list(
             tp.query(
                 f"select dur from thread_state where utid in ({utid_sql}) "
@@ -232,7 +323,7 @@ def _query_target_runtime(tp: Any, config: EventConfig, start_ns: int) -> tuple[
     return matched, runtime_rows, {key: value for key, value in runnable_by_cluster.items() if value}, runnable_by_thread
 
 
-def _query_frequency_series(tp: Any, start_ns: int) -> dict[str, tuple[list[float], list[float]]]:
+def _query_frequency_series(tp: Any, start_ns: int, cpu_clusters: list[CpuClusterInfo] | None = None) -> dict[str, tuple[list[float], list[float]]]:
     rows = list(
         tp.query(
             """
@@ -247,7 +338,7 @@ def _query_frequency_series(tp: Any, start_ns: int) -> dict[str, tuple[list[floa
     by_cluster: dict[str, tuple[list[float], list[float]]] = {}
     counts: dict[str, int] = {}
     for row in rows:
-        cluster = _cpu_cluster(int(row.cpu))
+        cluster = _cluster_name_for_cpu(int(row.cpu), cpu_clusters or [])
         counts[cluster] = counts.get(cluster, 0) + 1
         if counts[cluster] > 600:
             continue
@@ -255,6 +346,235 @@ def _query_frequency_series(tp: Any, start_ns: int) -> dict[str, tuple[list[floa
         ts.append((int(row.ts) - start_ns) / 1_000_000_000)
         values.append(float(row.value) / 1_000_000)
     return by_cluster
+
+
+def _query_sched_runs(tp: Any, config: EventConfig, start_ns: int, cpu_clusters: list[CpuClusterInfo], freq_series: dict[str, tuple[list[float], list[float]]]) -> list[SchedRun]:
+    target_by_thread = {target.thread: target for target in config.thread_targets}
+    rows = list(
+        tp.query(
+            """
+            select s.ts, s.dur, s.cpu, s.utid, t.name as thread_name
+            from sched s
+            join thread t on s.utid = t.utid
+            where s.dur > 0
+            order by s.ts
+            """
+        )
+    )
+    runs: list[SchedRun] = []
+    for row in rows:
+        thread = str(row.thread_name or "")
+        target = target_by_thread.get(thread)
+        cluster = _cluster_name_for_cpu(int(row.cpu), cpu_clusters)
+        ts_s = (int(row.ts) - start_ns) / 1_000_000_000
+        runs.append(
+            SchedRun(
+                event_name=target.event_name if target else "non_target",
+                category=target.category if target else "non_target",
+                thread=thread,
+                utid=int(row.utid),
+                ts_s=ts_s,
+                dur_us=float(row.dur) / 1000.0,
+                cpu=int(row.cpu),
+                cluster=cluster,
+                freq_ghz=_frequency_at(freq_series.get(cluster), ts_s),
+                is_target=target is not None,
+            )
+        )
+    return runs
+
+
+def _frequency_at(series: tuple[list[float], list[float]] | None, start_s: float) -> float | None:
+    if not series:
+        return None
+    ts, values = series
+    if not ts or not values:
+        return None
+    selected = values[0]
+    for time_s, value in zip(ts, values):
+        if time_s > start_s:
+            break
+        selected = value
+    return selected
+
+
+def _query_frequency_clusters(tp: Any) -> list[CpuClusterInfo]:
+    rows = list(
+        tp.query(
+            """
+            select cct.cpu as cpu, min(c.value) as min_hz, max(c.value) as max_hz
+            from counter c
+            join cpu_counter_track cct on c.track_id = cct.id
+            where cct.type='cpu_frequency'
+            group by cct.cpu
+            order by cct.cpu
+            """
+        )
+    )
+    groups: dict[float, list[tuple[int, float, float]]] = {}
+    for row in rows:
+        max_ghz = round(float(row.max_hz) / 1_000_000, 3)
+        min_ghz = round(float(row.min_hz) / 1_000_000, 3)
+        groups.setdefault(max_ghz, []).append((int(row.cpu), min_ghz, max_ghz))
+    if not groups:
+        return []
+    ordered = sorted(groups.items(), key=lambda item: item[0])
+    default_names = ["little", "mid", "big"]
+    clusters: list[CpuClusterInfo] = []
+    for idx, (_, cpu_rows) in enumerate(ordered):
+        name = default_names[idx] if idx < len(default_names) else f"cluster{idx}"
+        cpus = [cpu for cpu, _, _ in cpu_rows]
+        min_freq = min(min_ghz for _, min_ghz, _ in cpu_rows)
+        max_freq = max(max_ghz for _, _, max_ghz in cpu_rows)
+        clusters.append(CpuClusterInfo(name=name, cpus=cpus, min_freq_ghz=min_freq, max_freq_ghz=max_freq, source="freq_max_grouping"))
+    return clusters
+
+
+def _detect_clock_ramp_windows(freq_series: dict[str, tuple[list[float], list[float]]], sched_runs: list[SchedRun]) -> list[ClockRampWindow]:
+    windows: list[ClockRampWindow] = []
+    for cluster, (times, values) in freq_series.items():
+        if len(times) < 2 or len(values) < 2:
+            continue
+        baseline = statistics.median(values)
+        if baseline <= 0:
+            continue
+        threshold = baseline * 1.15
+        idx = 0
+        while idx < len(times):
+            if values[idx] < threshold:
+                idx += 1
+                continue
+            start_idx = idx
+            peak_idx = idx
+            while idx < len(times) and values[idx] >= threshold:
+                if values[idx] > values[peak_idx]:
+                    peak_idx = idx
+                idx += 1
+            end_idx = min(idx, len(times) - 1)
+            window = _build_clock_ramp_window(
+                cluster=cluster,
+                start_s=float(times[start_idx]),
+                peak_s=float(times[peak_idx]),
+                end_s=float(times[end_idx]),
+                baseline_ghz=float(baseline),
+                peak_ghz=float(values[peak_idx]),
+                sched_runs=sched_runs,
+            )
+            if window is not None:
+                windows.append(window)
+    return windows
+
+
+def _build_clock_ramp_window(cluster: str, start_s: float, peak_s: float, end_s: float, baseline_ghz: float, peak_ghz: float, sched_runs: list[SchedRun]) -> ClockRampWindow | None:
+    if peak_ghz <= baseline_ghz:
+        return None
+    window_runs = [
+        run
+        for run in sched_runs
+        if run.cluster == cluster and start_s <= run.ts_s <= end_s
+    ]
+    prior_start = max(0.0, start_s - max(0.05, end_s - start_s))
+    prior_threads = {
+        run.thread
+        for run in sched_runs
+        if not run.is_target and run.cluster == cluster and prior_start <= run.ts_s < start_s
+    }
+    target_runtime_us = sum(run.dur_us for run in window_runs if run.is_target)
+    non_target_runtime_us = sum(run.dur_us for run in window_runs if not run.is_target)
+    current_non_target_threads = {run.thread for run in window_runs if not run.is_target}
+    new_non_target_threads = len(current_non_target_threads - prior_threads)
+    target_runs = [run for run in sched_runs if run.is_target]
+    migrations = _target_migrations_into_cluster(target_runs, cluster, start_s, end_s)
+    periodicity_score = _periodicity_score(target_runs)
+    attribution, confidence, evidence = _classify_ramp(
+        target_runtime_us=target_runtime_us,
+        non_target_runtime_us=non_target_runtime_us,
+        new_non_target_threads=new_non_target_threads,
+        migrations=migrations,
+        periodicity_score=periodicity_score,
+    )
+    return ClockRampWindow(
+        cluster=cluster,
+        start_s=round(start_s, 6),
+        peak_s=round(peak_s, 6),
+        end_s=round(end_s, 6),
+        baseline_ghz=round(baseline_ghz, 3),
+        peak_ghz=round(peak_ghz, 3),
+        delta_pct=round((peak_ghz - baseline_ghz) / baseline_ghz * 100.0, 1),
+        target_runtime_us=round(target_runtime_us, 1),
+        non_target_runtime_us=round(non_target_runtime_us, 1),
+        new_non_target_threads=new_non_target_threads,
+        target_migrations_into_cluster=migrations,
+        periodicity_score=round(periodicity_score, 2),
+        attribution=attribution,
+        confidence=confidence,
+        evidence=evidence,
+        top_corunners=_top_corunners(window_runs),
+    )
+
+
+def _classify_ramp(target_runtime_us: float, non_target_runtime_us: float, new_non_target_threads: int, migrations: int, periodicity_score: float) -> tuple[str, str, list[str]]:
+    periodic = periodicity_score >= 0.70 and migrations >= 1 and target_runtime_us > 0
+    added = new_non_target_threads >= 1 and non_target_runtime_us >= max(1.0, target_runtime_us * 1.2)
+    evidence: list[str] = []
+    if added:
+        evidence.append(f"non-target runtime {non_target_runtime_us:.1f}us vs target {target_runtime_us:.1f}us")
+        evidence.append(f"{new_non_target_threads} new non-target threads in ramp window")
+    if periodic:
+        evidence.append(f"target migration count {migrations}")
+        evidence.append(f"periodicity score {periodicity_score:.2f}")
+    if added and periodic:
+        return "mixed_pressure", "medium", evidence
+    if added:
+        return "added_task_pressure", "medium", evidence
+    if periodic:
+        return "periodic_target_migration", "medium", evidence
+    return "unknown", "low", ["insufficient scheduler evidence for clock ramp attribution"]
+
+
+def _target_migrations_into_cluster(target_runs: list[SchedRun], cluster: str, start_s: float, end_s: float) -> int:
+    count = 0
+    by_thread: dict[str, list[SchedRun]] = {}
+    for run in target_runs:
+        by_thread.setdefault(run.thread, []).append(run)
+    for runs in by_thread.values():
+        ordered = sorted(runs, key=lambda run: run.ts_s)
+        for idx, run in enumerate(ordered):
+            if idx == 0 or run.cluster != cluster or not (start_s <= run.ts_s <= end_s):
+                continue
+            if ordered[idx - 1].cluster != cluster:
+                count += 1
+    return count
+
+
+def _periodicity_score(target_runs: list[SchedRun]) -> float:
+    by_thread: dict[str, list[float]] = {}
+    for run in target_runs:
+        by_thread.setdefault(run.thread, []).append(run.ts_s)
+    scores = []
+    for starts in by_thread.values():
+        ordered = sorted(starts)
+        if len(ordered) < 3:
+            continue
+        intervals_ms = [(right - left) * 1000.0 for left, right in zip(ordered, ordered[1:])]
+        for candidate in (16.7, 33.3):
+            errors = [abs(value - candidate) / candidate for value in intervals_ms]
+            score = max(0.0, 1.0 - statistics.median(errors))
+            scores.append(score)
+    return max(scores or [0.0])
+
+
+def _top_corunners(window_runs: list[SchedRun]) -> list[dict[str, str | float]]:
+    totals: dict[str, float] = {}
+    for run in window_runs:
+        if run.is_target:
+            continue
+        totals[run.thread] = totals.get(run.thread, 0.0) + run.dur_us
+    rows = [
+        {"thread": thread, "runtime_us": round(runtime_us, 1)}
+        for thread, runtime_us in sorted(totals.items(), key=lambda item: item[1], reverse=True)
+    ]
+    return rows[:3]
 
 
 def _first(tp: Any, query: str) -> Any:
@@ -269,16 +589,151 @@ def _scalar(tp: Any, query: str, column: str) -> int:
     return int(getattr(row, column) or 0)
 
 
+def _safe_scalar(tp: Any, query: str, column: str) -> int:
+    try:
+        return _scalar(tp, query, column)
+    except Exception:
+        return 0
+
+
+def _query_pmu_capability(tp: Any, pmu_counter_count: int) -> PmuCapability:
+    perf_samples = _safe_scalar(tp, "select count(*) as c from perf_sample", "c")
+    cpu_profile_samples = _safe_scalar(tp, "select count(*) as c from cpu_profile_stack_sample", "c")
+    callsites = _safe_scalar(tp, "select count(*) as c from stack_profile_callsite", "c")
+    frames = _safe_scalar(tp, "select count(*) as c from stack_profile_frame", "c")
+    mappings = _safe_scalar(tp, "select count(*) as c from stack_profile_mapping", "c")
+    has_perf_samples = (perf_samples + cpu_profile_samples) > 0
+    has_callstacks = has_perf_samples and callsites > 0 and frames > 0 and mappings > 0
+    caveats: list[str] = []
+    if not has_perf_samples:
+        caveats.append("N/A: perf callstack samples absent; thread function bottlenecks cannot be measured.")
+    elif not has_callstacks:
+        caveats.append("N/A: stack profile tables absent or empty; function attribution cannot be measured.")
+    if not pmu_counter_count:
+        caveats.append("N/A: linux.perf PMU counter tracks absent; cycle/instruction ratios unavailable.")
+    return PmuCapability(
+        has_perf_samples=has_perf_samples,
+        has_callstacks=has_callstacks,
+        has_cycles=pmu_counter_count > 0,
+        has_instructions=pmu_counter_count > 0,
+        classifier_events=[],
+        caveats=caveats,
+    )
+
+
+def _query_function_hotspots(tp: Any, config: EventConfig, pmu_capability: PmuCapability) -> dict[str, list[FunctionHotspot]]:
+    if not (pmu_capability.has_perf_samples and pmu_capability.has_callstacks):
+        return {}
+    target_threads = [target.thread for target in config.thread_targets]
+    if not target_threads:
+        return {}
+    thread_sql = ",".join(_sql_string(thread) for thread in target_threads)
+    try:
+        rows = list(
+            tp.query(
+                f"""
+                select
+                  t.name as thread,
+                  f.name as function,
+                  m.name as mapping,
+                  count(*) as self_samples
+                from perf_sample s
+                join thread t on s.utid = t.utid
+                join stack_profile_callsite c on s.callsite_id = c.id
+                join stack_profile_frame f on c.frame_id = f.id
+                join stack_profile_mapping m on f.mapping = m.id
+                where t.name in ({thread_sql})
+                group by t.name, f.name, m.name
+                order by t.name, self_samples desc, f.name
+                """
+            )
+        )
+    except Exception:
+        return {}
+
+    by_thread: dict[str, list[Any]] = {}
+    for row in rows:
+        by_thread.setdefault(str(row.thread), []).append(row)
+
+    result: dict[str, list[FunctionHotspot]] = {}
+    for thread, thread_rows in by_thread.items():
+        total_samples = sum(int(row.self_samples or 0) for row in thread_rows) or 1
+        hotspots: list[FunctionHotspot] = []
+        for row in sorted(thread_rows, key=lambda item: (-int(item.self_samples or 0), str(item.function)))[:3]:
+            samples = int(row.self_samples or 0)
+            classification, confidence, reason = _classify_function_hotspot(None, None, None, None, None)
+            hotspots.append(
+                FunctionHotspot(
+                    thread=thread,
+                    function=str(row.function or "unknown"),
+                    mapping=str(row.mapping or "unknown"),
+                    source_file=None,
+                    line_number=None,
+                    self_cycles=None,
+                    cumulative_cycles=None,
+                    self_samples=samples,
+                    cumulative_samples=samples,
+                    sample_pct=round(samples / total_samples * 100.0, 1),
+                    ipc=None,
+                    cache_miss_pct=None,
+                    frontend_stall_pct=None,
+                    backend_stall_pct=None,
+                    wait_pct=None,
+                    classification=classification,
+                    confidence=confidence,
+                    reason=reason,
+                )
+            )
+        if hotspots:
+            result[thread] = hotspots
+    return result
+
+
+def _classify_function_hotspot(ipc: float | None, cache_miss_pct: float | None, frontend_stall_pct: float | None, backend_stall_pct: float | None, wait_pct: float | None) -> tuple[str, str, str]:
+    if wait_pct is not None and wait_pct >= 30.0:
+        return "io_or_wait_bound", "medium", f"wait evidence is high ({wait_pct:.1f}% wall time); cycles alone do not represent blocked time."
+    if backend_stall_pct is not None and backend_stall_pct >= 30.0:
+        return "memory_bound", "medium", f"backend stall evidence is high ({backend_stall_pct:.1f}%)."
+    if frontend_stall_pct is not None and frontend_stall_pct >= 30.0:
+        return "frontend_bound", "medium", f"frontend stall evidence is high ({frontend_stall_pct:.1f}%)."
+    if ipc is not None and ipc >= 1.5 and (cache_miss_pct is None or cache_miss_pct < 10.0):
+        return "compute_bound", "medium", f"IPC is {ipc:.2f} and cache miss evidence is not high."
+    return "unknown", "low", "N/A: classifier PMU events unavailable; top function is sample-based only."
+
+
 def _sql_string(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def _dominant_cluster(cpus: list[int]) -> str:
+def _configured_cpu_clusters(config: EventConfig) -> list[CpuClusterInfo]:
+    clusters = []
+    for cluster in config.cpu_topology.clusters:
+        min_freq, max_freq = cluster.freq_hint_ghz
+        clusters.append(
+            CpuClusterInfo(
+                name=cluster.name,
+                cpus=cluster.cpus,
+                min_freq_ghz=min_freq,
+                max_freq_ghz=max_freq,
+                source=f"event_config:{config.cpu_topology.source}",
+            )
+        )
+    return clusters
+
+
+def _cluster_name_for_cpu(cpu: int, cpu_clusters: list[CpuClusterInfo]) -> str:
+    for cluster in cpu_clusters:
+        if cpu in cluster.cpus:
+            return cluster.name
+    return _cpu_cluster(cpu)
+
+
+def _dominant_cluster(cpus: list[int], cpu_clusters: list[CpuClusterInfo] | None = None) -> str:
     if not cpus:
         return "unknown"
     counts: dict[str, int] = {}
     for cpu in cpus:
-        cluster = _cpu_cluster(cpu)
+        cluster = _cluster_name_for_cpu(cpu, cpu_clusters or [])
         counts[cluster] = counts.get(cluster, 0) + 1
     return max(counts.items(), key=lambda item: item[1])[0]
 

@@ -21,7 +21,8 @@ def build_report_model(analysis: AnalysisResult, config: EventConfig) -> dict:
     hw_usage = _hw_usage(analysis)
     clock_context = _clock_context(analysis)
     clock_rows = _clock_rows(clock_context)
-    figures = _figures(analysis, portion_rows, clock_context)
+    clock_ramp_rows = _clock_ramp_rows(analysis)
+    figures = _figures(analysis, portion_rows, clock_context, clock_ramp_rows)
     top_issues = _issues(analysis, runtime_rows, jitter_rows)
     verdicts = _verdicts(analysis, hw_usage, portion_rows, runtime_rows, jitter_rows, clock_context, clock_rows)
     return {
@@ -47,12 +48,13 @@ def build_report_model(analysis: AnalysisResult, config: EventConfig) -> dict:
             "pbtx_hint": "Add linux.perf with HW_CPU_CYCLES + HW_INSTRUCTIONS followers to enable cycle/inst.",
             "rows": portion_rows,
         },
+        "pmu": _pmu_model(analysis),
         "runtime": {"rows": runtime_rows},
         "jitter": {
             "pbtx_hint": "Re-capture with sched/sched_waking enabled.",
             "rows": jitter_rows,
         },
-        "clock": {"throttle_rows": clock_rows, "overlap": clock_context["summary"]},
+        "clock": {"throttle_rows": clock_rows, "ramp_rows": clock_ramp_rows, "overlap": clock_context["summary"]},
         "contention": _contention(analysis),
         "appendix": {
             "unmatched": _unmatched(config, analysis),
@@ -69,7 +71,7 @@ def build_report_model(analysis: AnalysisResult, config: EventConfig) -> dict:
     }
 
 
-def _figures(analysis: AnalysisResult, portion_rows: list[dict], clock_context: dict) -> dict:
+def _figures(analysis: AnalysisResult, portion_rows: list[dict], clock_context: dict, clock_ramp_rows: list[dict] | None = None) -> dict:
     portion_data = [
         {"name": row["name"], "time_pct": float(row["time_pct"])}
         for row in portion_rows
@@ -96,6 +98,7 @@ def _figures(analysis: AnalysisResult, portion_rows: list[dict], clock_context: 
         "freq_ts": charts.freq_timeline(freq, active_spans=clock_context["active_spans"]),
         "freq_residency": charts.freq_residency(clock_context["residency_clusters"], clock_context["residency_buckets"], clock_context["residency"]),
         "freq_corr": charts.runtime_vs_freq(clock_context["freq_ghz"], clock_context["runtime_us"], clock_context["correlation"]),
+        "clock_ramps": charts.clock_ramp_attribution(clock_ramp_rows or []),
     }
     figures = {key: _figure_dict(value, key) for key, value in figure_values.items()}
     figures["hw_map"] = {"html": _hw_map_svg(_hw_usage(analysis)), "caption": "HW blocks are colored by detected evidence; grey means no direct evidence in the current trace audit."}
@@ -120,6 +123,7 @@ def _fallback_caption(key: str) -> str:
         "freq_ts": "No CPU frequency series; clock influence cannot be measured from this trace.",
         "freq_residency": "No CPU frequency residency; capture cpu_frequency counters to enable residency.",
         "freq_corr": "No runtime/frequency pairs; correlation is unavailable without clock and runtime samples.",
+        "clock_ramps": "No clock ramp attribution rows; scheduler and frequency overlap are required.",
     }[key]
 
 
@@ -253,6 +257,49 @@ def _portion_row(name: str, time_pct: float, has_pmu: bool) -> dict:
         "ipc": ipc,
         "pmu_na": pmu_na,
     }
+
+
+def _pmu_model(analysis: AnalysisResult) -> dict:
+    rows = _function_bottleneck_rows(analysis)
+    caveats = list(analysis.pmu_capability.caveats) if analysis.pmu_capability else ["N/A: PMU capability probe unavailable"]
+    if rows:
+        tier = "measured"
+        tier_label = "measured"
+    elif analysis.pmu_capability and analysis.pmu_capability.has_perf_samples:
+        tier = "partial"
+        tier_label = "partial"
+    else:
+        tier = "time_only"
+        tier_label = "time-only"
+    return {
+        "tier": tier,
+        "tier_label": tier_label,
+        "function_bottlenecks": rows,
+        "caveats": caveats,
+        "pbtx_hint": "Capture linux.perf callstack samples scoped to event_config threads to enable function bottlenecks.",
+    }
+
+
+def _function_bottleneck_rows(analysis: AnalysisResult) -> list[dict]:
+    rows = []
+    for thread, hotspots in analysis.function_hotspots_by_thread.items():
+        for idx, hotspot in enumerate(hotspots[:3], start=1):
+            rows.append(
+                {
+                    "thread": thread,
+                    "rank": idx,
+                    "function": hotspot.function,
+                    "mapping": hotspot.mapping,
+                    "sample_pct": f"{hotspot.sample_pct:.1f}",
+                    "self_samples": str(hotspot.self_samples),
+                    "cumulative_samples": str(hotspot.cumulative_samples),
+                    "ipc": f"{hotspot.ipc:.2f}" if hotspot.ipc is not None else "N/A: PMU event ratio unavailable",
+                    "classification": hotspot.classification,
+                    "confidence": hotspot.confidence,
+                    "reason": hotspot.reason,
+                }
+            )
+    return rows
 
 
 def _hw_usage(analysis: AnalysisResult) -> list[dict]:
@@ -412,6 +459,9 @@ def _kpis(analysis: AnalysisResult, runtime_rows: list[dict], jitter_rows: list[
 
 def _clock_verdict(clock_context: dict, clock_rows: list[dict]) -> str:
     sample_count = clock_context["summary"]["sample_count"]
+    ramp_count = int(clock_context["summary"].get("ramp_count") or 0)
+    if ramp_count:
+        return f"{ramp_count} clock ramp attribution rows; {sample_count} runtime/frequency overlap samples measured."
     if clock_rows:
         return f"{len(clock_rows)} measured clock-drop events; {sample_count} runtime/frequency overlap samples measured."
     if sample_count:
@@ -470,7 +520,7 @@ def _clock_context(analysis: AnalysisResult) -> dict:
         "runtime_us": runtime_us,
         "correlation": _pearson(freq_ghz, runtime_us),
         "samples": samples,
-        "summary": {"sample_count": len(freq_ghz), "drop_count": 0, "measurement_state": "measured" if freq_ghz else "na"},
+        "summary": {"sample_count": len(freq_ghz), "drop_count": 0, "ramp_count": len(analysis.clock_ramp_windows), "measurement_state": "measured" if freq_ghz else "na"},
     }
 
 
@@ -548,8 +598,47 @@ def _clock_rows(clock_context: dict) -> list[dict]:
     return rows
 
 
+def _clock_ramp_rows(analysis: AnalysisResult) -> list[dict]:
+    rows = []
+    for window in analysis.clock_ramp_windows[:20]:
+        top = window.top_corunners[0] if window.top_corunners else None
+        rows.append(
+            {
+                "t": f"{window.peak_s:.3f}",
+                "cluster": window.cluster,
+                "freq": f"{window.baseline_ghz:.2f}->{window.peak_ghz:.2f}G",
+                "delta_pct": f"+{window.delta_pct:.1f}%",
+                "delta_pct_float": window.delta_pct,
+                "attribution": window.attribution,
+                "confidence": window.confidence,
+                "target_runtime": f"{window.target_runtime_us:.1f}us",
+                "non_target_runtime": f"{window.non_target_runtime_us:.1f}us",
+                "migrations": str(window.target_migrations_into_cluster),
+                "periodicity": f"{window.periodicity_score:.2f}",
+                "top_corunner": f"{top['thread']} {top['runtime_us']}us" if top else "N/A: no co-runner in ramp window",
+                "evidence": "; ".join(window.evidence) if window.evidence else "N/A: no attribution evidence",
+            }
+        )
+    return rows
+
+
 def _contention(analysis: AnalysisResult) -> dict:
     target = analysis.runtime_rows[0].thread if analysis.runtime_rows else "configured targets"
+    corunner_totals: dict[str, float] = {}
+    for window in analysis.clock_ramp_windows:
+        for corunner in window.top_corunners:
+            name = str(corunner.get("thread") or "")
+            if not name:
+                continue
+            corunner_totals[name] = corunner_totals.get(name, 0.0) + float(corunner.get("runtime_us") or 0.0)
+    if corunner_totals:
+        return {
+            "target": target,
+            "corunners": [
+                {"name": name, "overlap": f"{runtime_us:.1f}us", "count": "clock ramp", "status": "warn"}
+                for name, runtime_us in sorted(corunner_totals.items(), key=lambda item: item[1], reverse=True)[:5]
+            ],
+        }
     return {
         "target": target,
         "corunners": [
@@ -560,6 +649,8 @@ def _contention(analysis: AnalysisResult) -> dict:
 
 def _caveats(analysis: AnalysisResult) -> list[str]:
     caveats = list(analysis.capability.caveats)
+    if analysis.pmu_capability:
+        caveats.extend(analysis.pmu_capability.caveats)
     if not analysis.matched_threads:
         caveats.append("No configured target thread strings were found in the trace payload.")
     return caveats

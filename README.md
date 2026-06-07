@@ -11,7 +11,9 @@ Perfetto trace analyzer for SoC multimedia scenarios. The current implementation
   - thread running-burst distribution from `sched`
   - runnable wait / scheduling jitter from `thread_state` `R` and `R+`
   - CPU frequency timeline from `cpu_frequency` counters
-  - PMU availability and PMU-missing caveats
+  - configurable CPU cluster topology from `event_config.yaml`
+  - clock ramp attribution from scheduler/frequency overlap
+  - PMU availability, PMU-missing caveats, and function bottleneck rows when linux.perf callstacks exist
   - HW block status from resolved target categories
 - Renders a single-file `report.html`.
 - Emits machine-readable `report.json` plus `metrics/` and `appendix/` outputs.
@@ -118,9 +120,11 @@ out/<job>/
 │   ├── hardware_usage.json
 │   ├── sw_portion.json
 │   ├── thread_runtime.json
+│   ├── thread_function_bottlenecks.json
 │   ├── wakeup_jitter.json
 │   ├── periods.json
 │   ├── cpu_clock.json
+│   ├── cluster_clock_attribution.json
 │   └── contention.json
 └── appendix/
     ├── matched_threads.csv
@@ -191,6 +195,61 @@ N/A: linux.perf absent
 
 The analyzer does not fabricate cycle or instruction percentages from CPU frequency.
 
+If `linux.perf` callstack samples and stack profile tables are present, the analyzer reports the top three sampled functions per configured `event_config` target thread. If PMU counters or callstacks are absent, the function bottleneck table is replaced with a reasoned `N/A:` caveat.
+
+### CPU Cluster Topology
+
+Cluster naming can vary by SoC and by project. Add an optional top-level `cpu_topology` block to `event_config.yaml` when the project knows the correct CPU grouping:
+
+```yaml
+cpu_topology:
+  source: project_config
+  clusters:
+    - name: little
+      cpus: [0, 1]
+      role: efficiency
+      freq_hint_ghz:
+        min: 0.3
+        max: 1.4
+    - name: mid
+      cpus: [2, 3, 4, 5, 6]
+      role: performance
+      freq_hint_ghz:
+        min: 0.5
+        max: 2.6
+    - name: big
+      cpus: [7]
+      role: prime
+      freq_hint_ghz:
+        min: 0.6
+        max: 3.4
+```
+
+If `cpu_topology` is absent, the analyzer groups CPUs by observed max `cpu_frequency`; only the legacy CPU-number rule is used as a final fallback.
+
+The same topology shape can also be supplied as a separate override file:
+
+```powershell
+uv run python -m soc_perfetto_analyzer.cli analyze `
+  --trace android-perfetto-FHD30-S24U.pftrace `
+  --event-config event_config.yaml `
+  --topology-config configs\s24u_cpu_topology.yaml `
+  --out out\job
+```
+
+### Clock Ramp Attribution
+
+The §6 clock section reports frequency ramp windows, not only clock drops. For each ramp window it compares target runtime, non-target runtime, newly observed co-runners, target migration into the cluster, and periodicity evidence. Attribution values are:
+
+```text
+added_task_pressure
+periodic_target_migration
+mixed_pressure
+unknown
+```
+
+The output is written to `metrics/cluster_clock_attribution.json` and mirrored in `report.json` as `cluster_clock_attribution`.
+
 ## Phase 9 Quality Gate
 
 The analyzer enforces the v2 report gate:
@@ -224,7 +283,10 @@ The tests cover:
 
 - event config JSON/YAML loading
 - exact target extraction
+- configurable CPU topology parsing
 - TraceProcessor SQL analysis against the included sample trace
+- cluster clock ramp attribution
+- PMU capability and function hotspot extraction
 - report model construction through `charts.py`
 - output bundle contract
 - Phase 9 quality gate behavior
@@ -240,5 +302,5 @@ The tests cover:
 
 - Task interval reconstruction from event_config start/end conditions is not implemented yet. Current §4 runtime is scheduler running-burst distribution.
 - Candidate/fuzzy matching is not used for metric generation.
-- PMU-derived cycle/instruction percentages require a trace captured with `linux.perf`.
+- PMU-derived cycle/instruction percentages and function bottlenecks require a trace captured with `linux.perf` callstack samples.
 - HW utilization counters are only reported when discoverable in the trace.

@@ -252,3 +252,41 @@ def runtime_vs_freq(freq_ghz, runtime_us, r_value):
     cap = (f"Runtime vs instantaneous frequency (r = {r_value:+.2f}, {sign}). "
            f"Negative correlation suggests DVFS-limited execution.")
     return _emit(fig), cap
+
+
+def clock_ramp_attribution(rows):
+    """rows: [{cluster, attribution, delta_pct_float}]"""
+    if not rows:
+        return _placeholder("no clock ramp attribution rows"), ""
+    labels = []
+    values = []
+    colors = []
+    for row in rows:
+        labels.append(f"{row['cluster']} · {row['attribution']}")
+        values.append(float(row.get("delta_pct_float", 0.0)))
+        attribution = str(row.get("attribution", "unknown"))
+        colors.append(
+            {
+                "added_task_pressure": COL["warn"],
+                "periodic_target_migration": COL["info"],
+                "mixed_pressure": COL["bad"],
+                "unknown": COL["na"],
+            }.get(attribution, COL["na"])
+        )
+    fig = go.Figure(go.Bar(
+        y=labels,
+        x=values,
+        orientation="h",
+        marker_color=colors,
+        text=[f"+{value:.1f}%" for value in values],
+        textposition="outside",
+        textfont=dict(size=10),
+    ))
+    fig.update_layout(**_layout(
+        height=80 + 32 * len(rows),
+        showlegend=False,
+        xaxis=dict(title="freq increase vs baseline (%)"),
+        margin=dict(l=180, r=80, t=14, b=42),
+    ))
+    cap = "Clock ramp windows grouped by cluster and attribution; bar length is frequency increase versus local baseline."
+    return _emit(fig), cap

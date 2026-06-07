@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from soc_perfetto_analyzer.analysis import AnalysisResult, CapabilitySummary, ThreadRuntime
+from soc_perfetto_analyzer.analysis import AnalysisResult, CapabilitySummary, ClockRampWindow, FunctionHotspot, PmuCapability, ThreadRuntime
 from soc_perfetto_analyzer.config import EventConfig, ThreadTarget
 from soc_perfetto_analyzer.report.model import build_report_model
 
@@ -343,3 +343,162 @@ def test_report_model_does_not_flag_low_clock_without_runtime_regression(monkeyp
 
     assert model["clock"]["overlap"]["drop_count"] == 0
     assert model["clock"]["throttle_rows"] == []
+
+
+def test_report_model_exposes_clock_ramp_attribution_and_corunners(monkeypatch):
+    import charts
+
+    for name in [
+        "portion_bar",
+        "runtime_box",
+        "wakeup_cdf",
+        "jitter_rank",
+        "interval_strip",
+        "freq_timeline",
+        "freq_residency",
+        "runtime_vs_freq",
+    ]:
+        monkeypatch.setattr(charts, name, lambda *args, **kwargs: ("<div>chart</div>", "caption with comparison"))
+    monkeypatch.setattr(charts, "clock_ramp_attribution", lambda *args, **kwargs: ("<div>ramp</div>", "ramp caption with comparison"))
+    monkeypatch.setattr(charts, "reset_plotlyjs", lambda: None)
+
+    config = EventConfig(
+        path=Path("event_config.json"),
+        description="fixture",
+        config_version="1.0",
+        event_count=1,
+        thread_targets=[ThreadTarget(event_name="Camera", thread="CamX_ReqProc", category="camera_hal")],
+        raw={"events": []},
+    )
+    analysis = AnalysisResult(
+        trace_path=Path("sample.pftrace"),
+        trace_size_bytes=1024,
+        trace_duration_s=2.0,
+        capability=CapabilitySummary(
+            sched_switch=True,
+            sched_waking=False,
+            cpu_frequency=True,
+            irq_events=False,
+            hw_counters=False,
+            pmu=False,
+            trace_processor=True,
+            caveats=[],
+        ),
+        matched_threads=["CamX_ReqProc"],
+        runtime_rows=[
+            ThreadRuntime(
+                category="camera_hal",
+                thread="CamX_ReqProc",
+                samples_us=[100_000.0],
+                cpus=[4],
+                starts_s=[0.25],
+            )
+        ],
+        clock_ramp_windows=[
+            ClockRampWindow(
+                cluster="mid",
+                start_s=0.10,
+                peak_s=0.12,
+                end_s=0.20,
+                baseline_ghz=1.0,
+                peak_ghz=1.4,
+                delta_pct=40.0,
+                target_runtime_us=200.0,
+                non_target_runtime_us=1600.0,
+                new_non_target_threads=2,
+                target_migrations_into_cluster=0,
+                periodicity_score=0.0,
+                attribution="added_task_pressure",
+                confidence="medium",
+                evidence=["non-target runtime 1600.0us vs target 200.0us"],
+                top_corunners=[{"thread": "RenderThread", "runtime_us": 900.0}],
+            )
+        ],
+    )
+
+    model = build_report_model(analysis, config)
+
+    assert model["figures"]["clock_ramps"]["html"] == "<div>ramp</div>"
+    assert model["clock"]["ramp_rows"][0]["attribution"] == "added_task_pressure"
+    assert model["clock"]["ramp_rows"][0]["top_corunner"] == "RenderThread 900.0us"
+    assert model["contention"]["corunners"][0]["name"] == "RenderThread"
+    assert "clock ramp" in model["verdicts"]["clock"].lower()
+
+
+def test_report_model_exposes_pmu_function_bottlenecks(monkeypatch):
+    import charts
+
+    for name in [
+        "portion_bar",
+        "runtime_box",
+        "wakeup_cdf",
+        "jitter_rank",
+        "interval_strip",
+        "freq_timeline",
+        "freq_residency",
+        "runtime_vs_freq",
+        "clock_ramp_attribution",
+    ]:
+        monkeypatch.setattr(charts, name, lambda *args, **kwargs: ("<div>chart</div>", "caption with comparison"))
+    monkeypatch.setattr(charts, "reset_plotlyjs", lambda: None)
+
+    config = EventConfig(
+        path=Path("event_config.json"),
+        description="fixture",
+        config_version="1.0",
+        event_count=1,
+        thread_targets=[ThreadTarget(event_name="Camera", thread="CamX_ReqProc", category="camera_hal")],
+        raw={"events": []},
+    )
+    hotspot = FunctionHotspot(
+        thread="CamX_ReqProc",
+        function="ProcessFrame",
+        mapping="libcamera.so",
+        source_file=None,
+        line_number=None,
+        self_cycles=None,
+        cumulative_cycles=None,
+        self_samples=50,
+        cumulative_samples=50,
+        sample_pct=47.6,
+        ipc=None,
+        cache_miss_pct=None,
+        frontend_stall_pct=None,
+        backend_stall_pct=None,
+        wait_pct=None,
+        classification="unknown",
+        confidence="low",
+        reason="N/A: classifier PMU events unavailable; top function is sample-based only.",
+    )
+    analysis = AnalysisResult(
+        trace_path=Path("sample.pftrace"),
+        trace_size_bytes=1024,
+        trace_duration_s=2.0,
+        capability=CapabilitySummary(
+            sched_switch=True,
+            sched_waking=False,
+            cpu_frequency=True,
+            irq_events=False,
+            hw_counters=False,
+            pmu=True,
+            trace_processor=True,
+            caveats=[],
+        ),
+        matched_threads=["CamX_ReqProc"],
+        runtime_rows=[ThreadRuntime(category="camera_hal", thread="CamX_ReqProc", samples_us=[1000.0], cpus=[4])],
+        pmu_capability=PmuCapability(
+            has_perf_samples=True,
+            has_callstacks=True,
+            has_cycles=True,
+            has_instructions=False,
+            caveats=[],
+        ),
+        function_hotspots_by_thread={"CamX_ReqProc": [hotspot]},
+    )
+
+    model = build_report_model(analysis, config)
+
+    assert model["pmu"]["tier"] == "measured"
+    assert model["pmu"]["function_bottlenecks"][0]["function"] == "ProcessFrame"
+    assert model["pmu"]["function_bottlenecks"][0]["rank"] == 1
+    assert model["pmu"]["function_bottlenecks"][0]["classification"] == "unknown"

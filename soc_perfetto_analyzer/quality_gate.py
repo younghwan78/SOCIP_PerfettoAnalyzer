@@ -106,7 +106,7 @@ def _check_hw_badges(model: dict[str, Any], checks: list[str], failures: list[st
 
 
 def _check_chart_contract(model: dict[str, Any], checks: list[str], failures: list[str]) -> None:
-    required = {"portion", "runtime_box", "wakeup_cdf", "jitter_rank", "interval_strip", "freq_ts", "freq_residency", "freq_corr", "hw_map"}
+    required = {"portion", "runtime_box", "wakeup_cdf", "jitter_rank", "interval_strip", "freq_ts", "freq_residency", "freq_corr", "clock_ramps", "hw_map"}
     present = {key for key, value in (model.get("figures") or {}).items() if value}
     missing = sorted(required - present)
     _record("all required chart slots are populated by report model", not missing, checks, failures, f"missing figures: {missing}")

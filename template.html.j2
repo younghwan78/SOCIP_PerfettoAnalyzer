@@ -249,6 +249,22 @@
         <td class="muted">{{ t.core_mix }}</td></tr>
       {% endfor %}
     </tbody></table></details>
+    <details open><summary>Per-thread PMU top functions</summary>
+      {% if r.pmu.function_bottlenecks %}
+      <table><thead><tr><th>Thread</th><th class="num">Rank</th><th>Function</th>
+        <th>Mapping</th><th class="num">Samples</th><th class="num">Sample %</th>
+        <th class="num">IPC</th><th>Bound</th><th>Reason</th></tr></thead><tbody>
+        {% for p in r.pmu.function_bottlenecks %}
+        <tr><td><code>{{ p.thread }}</code></td><td class="num">{{ p.rank }}</td>
+          <td><code>{{ p.function }}</code></td><td class="muted">{{ p.mapping }}</td>
+          <td class="num">{{ p.self_samples }}</td><td class="num">{{ p.sample_pct }}</td>
+          <td class="num">{{ p.ipc }}</td><td>{{ p.classification }}</td><td>{{ p.reason }}</td></tr>
+        {% endfor %}
+      </tbody></table>
+      {% else %}
+      <div class="note warn">{{ r.pmu.caveats|join("; ") }} {{ r.pmu.pbtx_hint }}</div>
+      {% endif %}
+    </details>
   </section>
 
   {# ===================== §5 JITTER ===================== #}
@@ -291,6 +307,26 @@
       <div class="cap">{{ r.figures.freq_residency.caption }}</div></div>{% endif %}
     {% if r.figures.freq_corr %}<div class="fig">{{ r.figures.freq_corr.html|safe }}
       <div class="cap">{{ r.figures.freq_corr.caption }}</div></div>{% endif %}
+    {% if r.figures.clock_ramps %}<div class="fig">{{ r.figures.clock_ramps.html|safe }}
+      <div class="cap">{{ r.figures.clock_ramps.caption }}</div></div>{% endif %}
+    <details open><summary>Clock ramp attribution</summary>
+      {% if r.clock.ramp_rows %}
+      <table><thead><tr><th class="num">t (s)</th><th>cluster</th><th>freq</th>
+        <th>attribution</th><th>confidence</th><th class="num">target rt</th>
+        <th class="num">non-target rt</th><th class="num">migration</th>
+        <th class="num">periodicity</th><th>top co-runner</th></tr></thead><tbody>
+        {% for e in r.clock.ramp_rows %}
+        <tr><td class="num">{{ e.t }}</td><td>{{ e.cluster }}</td><td>{{ e.freq }}</td>
+          <td>{{ e.attribution }}</td><td>{{ e.confidence }}</td>
+          <td class="num">{{ e.target_runtime }}</td><td class="num">{{ e.non_target_runtime }}</td>
+          <td class="num">{{ e.migrations }}</td><td class="num">{{ e.periodicity }}</td>
+          <td><code>{{ e.top_corunner }}</code></td></tr>
+        {% endfor %}
+      </tbody></table>
+      {% else %}
+      <div class="note">N/A: no clock ramp attribution rows from scheduler/frequency overlap.</div>
+      {% endif %}
+    </details>
     {% if r.clock.throttle_rows %}
     <details open><summary>Clock-drop events</summary>
     <table><thead><tr><th class="num">t (s)</th><th>cluster</th><th>drop</th>

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +15,26 @@ class ThreadTarget:
 
 
 @dataclass(frozen=True)
+class CpuCluster:
+    name: str
+    cpus: list[int]
+    role: str = ""
+    freq_hint_ghz: tuple[float | None, float | None] = (None, None)
+
+
+@dataclass(frozen=True)
+class CpuTopology:
+    source: str
+    clusters: list[CpuCluster]
+
+    def cluster_for_cpu(self, cpu: int) -> str | None:
+        for cluster in self.clusters:
+            if cpu in cluster.cpus:
+                return cluster.name
+        return None
+
+
+@dataclass(frozen=True)
 class EventConfig:
     path: Path
     description: str
@@ -22,6 +42,7 @@ class EventConfig:
     event_count: int
     thread_targets: list[ThreadTarget]
     raw: dict[str, Any]
+    cpu_topology: CpuTopology = field(default_factory=lambda: CpuTopology(source="absent", clusters=[]))
 
 
 def load_event_config(path: Path | str) -> EventConfig:
@@ -35,8 +56,15 @@ def load_event_config(path: Path | str) -> EventConfig:
         config_version=str(raw.get("config_version") or "unknown"),
         event_count=len(events),
         thread_targets=targets,
+        cpu_topology=_extract_cpu_topology(raw.get("cpu_topology")),
         raw=raw,
     )
+
+
+def load_cpu_topology_config(path: Path | str) -> CpuTopology:
+    raw = _load_mapping(Path(path))
+    value = raw.get("cpu_topology") if "cpu_topology" in raw else raw
+    return _extract_cpu_topology(value)
 
 
 def _load_mapping(path: Path) -> dict[str, Any]:
@@ -116,3 +144,40 @@ def _to_float(value: Any) -> float | None:
         return None if value is None else float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _extract_cpu_topology(value: Any) -> CpuTopology:
+    if not isinstance(value, dict):
+        return CpuTopology(source="absent", clusters=[])
+    clusters = []
+    for cluster in value.get("clusters") or []:
+        if not isinstance(cluster, dict):
+            continue
+        name = str(cluster.get("name") or "").strip()
+        cpus = _to_int_list(cluster.get("cpus"))
+        if not name or not cpus:
+            continue
+        freq_hint = cluster.get("freq_hint_ghz") or {}
+        clusters.append(
+            CpuCluster(
+                name=name,
+                cpus=cpus,
+                role=str(cluster.get("role") or ""),
+                freq_hint_ghz=(_to_float(freq_hint.get("min")), _to_float(freq_hint.get("max")))
+                if isinstance(freq_hint, dict)
+                else (None, None),
+            )
+        )
+    return CpuTopology(source=str(value.get("source") or "event_config"), clusters=clusters)
+
+
+def _to_int_list(value: Any) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    cpus: list[int] = []
+    for item in value:
+        try:
+            cpus.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return cpus

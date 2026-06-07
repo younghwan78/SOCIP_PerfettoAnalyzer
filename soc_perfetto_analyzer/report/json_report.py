@@ -27,9 +27,11 @@ def build_report_json(model: dict[str, Any], analysis: AnalysisResult, config: E
         "hardware_usage": model["hw_usage"],
         "sw_portion": model["portion"]["rows"],
         "thread_runtime": model["runtime"]["rows"],
+        "thread_function_bottlenecks": model["pmu"]["function_bottlenecks"],
         "wakeup_jitter": model["jitter"]["rows"],
         "periods": [],
         "cpu_clock": model["clock"],
+        "cluster_clock_attribution": model["clock"].get("ramp_rows", []),
         "contention": model["contention"]["corunners"],
         "issues": model["top_issues"],
         "caveats": model["appendix"]["caveats"],
@@ -71,9 +73,11 @@ def write_output_bundle(out_dir: Path, model: dict[str, Any], analysis: Analysis
     _write_json(metrics_dir / "hardware_usage.json", model["hw_usage"])
     _write_json(metrics_dir / "sw_portion.json", model["portion"])
     _write_json(metrics_dir / "thread_runtime.json", model["runtime"]["rows"])
+    _write_json(metrics_dir / "thread_function_bottlenecks.json", model["pmu"]["function_bottlenecks"])
     _write_json(metrics_dir / "wakeup_jitter.json", model["jitter"]["rows"])
     _write_json(metrics_dir / "periods.json", report_json["periods"])
     _write_json(metrics_dir / "cpu_clock.json", model["clock"])
+    _write_json(metrics_dir / "cluster_clock_attribution.json", report_json["cluster_clock_attribution"])
     _write_json(metrics_dir / "contention.json", model["contention"])
     _write_json(out_dir / "quality_gate.json", asdict(gate))
 
