@@ -66,6 +66,49 @@ cpu_topology:
     assert config.cpu_topology.cluster_for_cpu(5) == "mid"
 
 
+def test_event_config_extracts_clock_change_report_filter(tmp_path):
+    config_path = tmp_path / "event_config_with_clock_filter.yaml"
+    config_path.write_text(
+        """
+events: []
+report_filters:
+  clock_change:
+    baseline: duration_weighted_mean
+    ramp_delta_pct: 12.5
+    drop_delta_pct: 20
+    min_duration_ms: 7
+    merge_gap_ms: 4
+    max_rows: 12
+    include_unknown: true
+""",
+        encoding="utf-8",
+    )
+
+    config = load_event_config(config_path)
+
+    clock_filter = config.report_filters.clock_change
+    assert clock_filter.baseline == "duration_weighted_mean"
+    assert clock_filter.ramp_delta_pct == 12.5
+    assert clock_filter.drop_delta_pct == 20.0
+    assert clock_filter.min_duration_ms == 7.0
+    assert clock_filter.merge_gap_ms == 4.0
+    assert clock_filter.max_rows == 12
+    assert clock_filter.include_unknown is True
+
+
+def test_event_config_uses_default_clock_change_report_filter():
+    config = load_event_config(Path("event_config.yaml"))
+
+    clock_filter = config.report_filters.clock_change
+    assert clock_filter.baseline == "duration_weighted_mean"
+    assert clock_filter.ramp_delta_pct == 15.0
+    assert clock_filter.drop_delta_pct == 15.0
+    assert clock_filter.min_duration_ms == 5.0
+    assert clock_filter.merge_gap_ms == 3.0
+    assert clock_filter.max_rows == 20
+    assert clock_filter.include_unknown is False
+
+
 def test_load_cpu_topology_config_accepts_topology_only_file(tmp_path):
     topology_path = tmp_path / "topology.yaml"
     topology_path.write_text(

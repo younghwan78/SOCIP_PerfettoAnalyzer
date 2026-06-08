@@ -64,8 +64,13 @@ def test_analyze_writes_output_contract_bundle_without_chart_html(tmp_path):
     assert report_json["metadata"]["trace_duration_ms"] is not None
     assert report_json["metadata"]["trace_processor_version"] != "unavailable"
     assert report_json["cluster_clock_attribution"] == report_json["cpu_clock"]["ramp_rows"]
+    assert report_json["cpu_clock"]["significant_rows"]
+    assert len(report_json["cpu_clock"]["significant_rows"]) <= report_json["cpu_clock"]["filter"]["max_rows"]
+    assert len(report_json["cpu_clock"]["significant_rows"]) < len(report_json["cluster_clock_attribution"])
+    assert report_json["cpu_clock"]["filter"]["raw_ramp_count"] == len(report_json["cluster_clock_attribution"])
     assert report_json["thread_function_bottlenecks"] == []
     assert any("perf callstack samples absent" in caveat for caveat in report_json["caveats"])
+    assert max(float(row["t"]) for row in report_json["cluster_clock_attribution"]) > 10.0
     isp = next(row for row in report_json["hardware_usage"] if row["name"] == "ISP")
     assert isp["state_label"] == "USED"
     jitter = report_json["wakeup_jitter"][0]
@@ -75,6 +80,9 @@ def test_analyze_writes_output_contract_bundle_without_chart_html(tmp_path):
     raw_report = (out_dir / "report.json").read_text(encoding="utf-8")
     assert "Plotly.newPlot" not in raw_report
     assert "<div" not in raw_report
+    report_html = (out_dir / "report.html").read_text(encoding="utf-8")
+    assert "Significant clock change windows" in report_html
+    assert "Raw clock ramp attribution" in report_html
 
     gate = json.loads((out_dir / "quality_gate.json").read_text(encoding="utf-8"))
     assert gate["passed"] is True

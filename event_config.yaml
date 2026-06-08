@@ -147,3 +147,13 @@ events:
 
 config_version: "1.0"
 description: Event configuration for systrace analysis
+
+report_filters:
+  clock_change:
+    baseline: duration_weighted_mean
+    ramp_delta_pct: 15
+    drop_delta_pct: 15
+    min_duration_ms: 5
+    merge_gap_ms: 3
+    max_rows: 20
+    include_unknown: false

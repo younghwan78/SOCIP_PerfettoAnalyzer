@@ -23,6 +23,7 @@ def test_analyze_trace_uses_trace_processor_sql_for_sample_trace():
     assert max(analysis.runtime_rows[0].samples_us) > 1000.0
     assert analysis.wakeup_samples_by_cluster
     assert analysis.freq_series
+    assert min(max(ts) for ts, _ in analysis.freq_series.values()) > 10.0
     assert analysis.cpu_clusters
     assert any(cluster.cpus == [0, 1] for cluster in analysis.cpu_clusters)
     assert len(analysis.target_runs) == 229

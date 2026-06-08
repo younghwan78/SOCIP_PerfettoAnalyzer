@@ -25,9 +25,10 @@ def test_render_report_preserves_sample_structure_and_single_file(tmp_path):
     assert "perf callstack samples absent" in html
     assert "plotly" in html.lower() or "no data:" in html
     assert html.count('class="cap"') >= 7
-    assert "Clock-drop events" in html
-    assert "Clock ramp attribution" in html
-    assert "runtime/frequency overlap samples measured" in html
+    assert "Significant clock change windows" in html
+    assert "Raw clock-drop events" in html
+    assert "Raw clock ramp attribution" in html
+    assert "average-relative clock windows" in html
     assert "N/A: runtime/frequency overlap not implemented" not in html
     assert "target +15% vs baseline" not in html
     assert "r = -0.42" not in html

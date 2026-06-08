@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 import statistics
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from importlib import metadata
 from pathlib import Path
@@ -336,12 +337,8 @@ def _query_frequency_series(tp: Any, start_ns: int, cpu_clusters: list[CpuCluste
         )
     )
     by_cluster: dict[str, tuple[list[float], list[float]]] = {}
-    counts: dict[str, int] = {}
     for row in rows:
         cluster = _cluster_name_for_cpu(int(row.cpu), cpu_clusters or [])
-        counts[cluster] = counts.get(cluster, 0) + 1
-        if counts[cluster] > 600:
-            continue
         ts, values = by_cluster.setdefault(cluster, ([], []))
         ts.append((int(row.ts) - start_ns) / 1_000_000_000)
         values.append(float(row.value) / 1_000_000)
@@ -390,12 +387,10 @@ def _frequency_at(series: tuple[list[float], list[float]] | None, start_s: float
     ts, values = series
     if not ts or not values:
         return None
-    selected = values[0]
-    for time_s, value in zip(ts, values):
-        if time_s > start_s:
-            break
-        selected = value
-    return selected
+    idx = bisect_right(ts, start_s) - 1
+    if idx < 0:
+        return values[0]
+    return values[min(idx, len(values) - 1)]
 
 
 def _query_frequency_clusters(tp: Any) -> list[CpuClusterInfo]:
@@ -432,6 +427,9 @@ def _query_frequency_clusters(tp: Any) -> list[CpuClusterInfo]:
 
 def _detect_clock_ramp_windows(freq_series: dict[str, tuple[list[float], list[float]]], sched_runs: list[SchedRun]) -> list[ClockRampWindow]:
     windows: list[ClockRampWindow] = []
+    runs_by_cluster, run_times_by_cluster = _index_runs_by_cluster(sched_runs)
+    target_runs = [run for run in sched_runs if run.is_target]
+    periodicity_score = _periodicity_score(target_runs)
     for cluster, (times, values) in freq_series.items():
         if len(times) < 2 or len(values) < 2:
             continue
@@ -451,41 +449,60 @@ def _detect_clock_ramp_windows(freq_series: dict[str, tuple[list[float], list[fl
                     peak_idx = idx
                 idx += 1
             end_idx = min(idx, len(times) - 1)
+            start_s = float(times[start_idx])
+            end_s = float(times[end_idx])
+            prior_start = max(0.0, start_s - max(0.05, end_s - start_s))
+            cluster_runs = runs_by_cluster.get(cluster, [])
+            cluster_run_times = run_times_by_cluster.get(cluster, [])
             window = _build_clock_ramp_window(
                 cluster=cluster,
-                start_s=float(times[start_idx]),
+                start_s=start_s,
                 peak_s=float(times[peak_idx]),
-                end_s=float(times[end_idx]),
+                end_s=end_s,
                 baseline_ghz=float(baseline),
                 peak_ghz=float(values[peak_idx]),
-                sched_runs=sched_runs,
+                window_runs=_runs_in_window(cluster_runs, cluster_run_times, start_s, end_s),
+                prior_runs=_runs_in_window(cluster_runs, cluster_run_times, prior_start, start_s, include_end=False),
+                target_runs=target_runs,
+                periodicity_score=periodicity_score,
             )
             if window is not None:
                 windows.append(window)
     return windows
 
 
-def _build_clock_ramp_window(cluster: str, start_s: float, peak_s: float, end_s: float, baseline_ghz: float, peak_ghz: float, sched_runs: list[SchedRun]) -> ClockRampWindow | None:
+def _index_runs_by_cluster(sched_runs: list[SchedRun]) -> tuple[dict[str, list[SchedRun]], dict[str, list[float]]]:
+    runs_by_cluster: dict[str, list[SchedRun]] = {}
+    for run in sched_runs:
+        runs_by_cluster.setdefault(run.cluster, []).append(run)
+    times_by_cluster: dict[str, list[float]] = {}
+    for cluster, runs in runs_by_cluster.items():
+        runs.sort(key=lambda run: run.ts_s)
+        times_by_cluster[cluster] = [run.ts_s for run in runs]
+    return runs_by_cluster, times_by_cluster
+
+
+def _runs_in_window(runs: list[SchedRun], times: list[float], start_s: float, end_s: float, include_end: bool = True) -> list[SchedRun]:
+    if not runs or not times:
+        return []
+    left = bisect_left(times, start_s)
+    right = bisect_right(times, end_s) if include_end else bisect_left(times, end_s)
+    return runs[left:right]
+
+
+def _build_clock_ramp_window(cluster: str, start_s: float, peak_s: float, end_s: float, baseline_ghz: float, peak_ghz: float, window_runs: list[SchedRun], prior_runs: list[SchedRun], target_runs: list[SchedRun], periodicity_score: float) -> ClockRampWindow | None:
     if peak_ghz <= baseline_ghz:
         return None
-    window_runs = [
-        run
-        for run in sched_runs
-        if run.cluster == cluster and start_s <= run.ts_s <= end_s
-    ]
-    prior_start = max(0.0, start_s - max(0.05, end_s - start_s))
     prior_threads = {
         run.thread
-        for run in sched_runs
-        if not run.is_target and run.cluster == cluster and prior_start <= run.ts_s < start_s
+        for run in prior_runs
+        if not run.is_target
     }
     target_runtime_us = sum(run.dur_us for run in window_runs if run.is_target)
     non_target_runtime_us = sum(run.dur_us for run in window_runs if not run.is_target)
     current_non_target_threads = {run.thread for run in window_runs if not run.is_target}
     new_non_target_threads = len(current_non_target_threads - prior_threads)
-    target_runs = [run for run in sched_runs if run.is_target]
     migrations = _target_migrations_into_cluster(target_runs, cluster, start_s, end_s)
-    periodicity_score = _periodicity_score(target_runs)
     attribution, confidence, evidence = _classify_ramp(
         target_runtime_us=target_runtime_us,
         non_target_runtime_us=non_target_runtime_us,

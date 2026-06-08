@@ -309,7 +309,25 @@
       <div class="cap">{{ r.figures.freq_corr.caption }}</div></div>{% endif %}
     {% if r.figures.clock_ramps %}<div class="fig">{{ r.figures.clock_ramps.html|safe }}
       <div class="cap">{{ r.figures.clock_ramps.caption }}</div></div>{% endif %}
-    <details open><summary>Clock ramp attribution</summary>
+    <details open><summary>Significant clock change windows</summary>
+      {% if r.clock.significant_rows %}
+      <div class="note">Showing {{ r.clock.filter.display_count }} of {{ r.clock.filter.candidate_count }} average-relative clock windows.
+        Filter: up ≥ {{ r.clock.filter.ramp_delta_pct }}%, down ≥ {{ r.clock.filter.drop_delta_pct }}%,
+        min {{ r.clock.filter.min_duration_ms }}ms, max {{ r.clock.filter.max_rows }} rows.</div>
+      <table><thead><tr><th>time range</th><th>cluster</th><th>dir</th><th>avg→extreme</th>
+        <th class="num">Δ vs avg</th><th class="num">duration</th><th>attribution</th>
+        <th>confidence</th><th>top co-runner</th></tr></thead><tbody>
+        {% for e in r.clock.significant_rows %}
+        <tr><td>{{ e.time_range }}</td><td>{{ e.cluster }}</td><td>{{ e.direction }}</td><td>{{ e.freq }}</td>
+          <td class="num">{{ e.delta_vs_avg }}</td><td class="num">{{ e.duration_ms }}ms</td>
+          <td>{{ e.attribution }}</td><td>{{ e.confidence }}</td><td><code>{{ e.top_corunner }}</code></td></tr>
+        {% endfor %}
+      </tbody></table>
+      {% else %}
+      <div class="note">N/A: no clock windows exceeded the configured average-relative thresholds.</div>
+      {% endif %}
+    </details>
+    <details><summary>Raw clock ramp attribution ({{ r.clock.filter.raw_ramp_count }} rows)</summary>
       {% if r.clock.ramp_rows %}
       <table><thead><tr><th class="num">t (s)</th><th>cluster</th><th>freq</th>
         <th>attribution</th><th>confidence</th><th class="num">target rt</th>
@@ -328,7 +346,7 @@
       {% endif %}
     </details>
     {% if r.clock.throttle_rows %}
-    <details open><summary>Clock-drop events</summary>
+    <details><summary>Raw clock-drop events ({{ r.clock.filter.raw_drop_count }} rows)</summary>
     <table><thead><tr><th class="num">t (s)</th><th>cluster</th><th>drop</th>
       <th>concurrent runtime Δ</th><th>thermal?</th></tr></thead><tbody>
       {% for e in r.clock.throttle_rows %}
@@ -337,7 +355,7 @@
       {% endfor %}
     </tbody></table></details>
     {% else %}
-    <details open><summary>Clock-drop events</summary>
+    <details><summary>Raw clock-drop events</summary>
       {% if r.clock.overlap.measurement_state == "measured" %}
       <div class="note">{{ r.clock.overlap.sample_count }} runtime/frequency overlap samples measured. No clock-drop rows are reported yet; drop detection is a separate threshold step.</div>
       {% else %}

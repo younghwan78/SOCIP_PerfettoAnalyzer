@@ -7,7 +7,7 @@ import charts
 
 from soc_perfetto_analyzer import __version__
 from soc_perfetto_analyzer.analysis import AnalysisResult, ThreadRuntime, covariance, mad, percentile
-from soc_perfetto_analyzer.config import EventConfig
+from soc_perfetto_analyzer.config import ClockChangeFilterConfig, EventConfig
 
 
 HW_BLOCKS = ("GPU", "DPU", "CODEC", "ISP", "NPU")
@@ -22,9 +22,10 @@ def build_report_model(analysis: AnalysisResult, config: EventConfig) -> dict:
     clock_context = _clock_context(analysis)
     clock_rows = _clock_rows(clock_context)
     clock_ramp_rows = _clock_ramp_rows(analysis)
+    significant_clock_rows, clock_filter = _significant_clock_change_rows(analysis, clock_ramp_rows, clock_rows, config.report_filters.clock_change)
     figures = _figures(analysis, portion_rows, clock_context, clock_ramp_rows)
     top_issues = _issues(analysis, runtime_rows, jitter_rows)
-    verdicts = _verdicts(analysis, hw_usage, portion_rows, runtime_rows, jitter_rows, clock_context, clock_rows)
+    verdicts = _verdicts(analysis, hw_usage, portion_rows, runtime_rows, jitter_rows, clock_context, clock_rows, significant_clock_rows)
     return {
         "meta": {
             "scenario": _scenario_name(config),
@@ -37,7 +38,7 @@ def build_report_model(analysis: AnalysisResult, config: EventConfig) -> dict:
         "verdicts": verdicts,
         "hw_usage": hw_usage,
         "hw_usage_note": _hw_note(analysis),
-        "kpis": _kpis(analysis, runtime_rows, jitter_rows, clock_rows),
+        "kpis": _kpis(analysis, runtime_rows, jitter_rows, clock_rows, significant_clock_rows),
         "top_issues": top_issues,
         "capability": _capability(analysis),
         "figures": figures,
@@ -54,7 +55,13 @@ def build_report_model(analysis: AnalysisResult, config: EventConfig) -> dict:
             "pbtx_hint": "Re-capture with sched/sched_waking enabled.",
             "rows": jitter_rows,
         },
-        "clock": {"throttle_rows": clock_rows, "ramp_rows": clock_ramp_rows, "overlap": clock_context["summary"]},
+        "clock": {
+            "significant_rows": significant_clock_rows,
+            "filter": clock_filter,
+            "throttle_rows": clock_rows,
+            "ramp_rows": clock_ramp_rows,
+            "overlap": clock_context["summary"],
+        },
         "contention": _contention(analysis),
         "appendix": {
             "unmatched": _unmatched(config, analysis),
@@ -87,6 +94,8 @@ def _figures(analysis: AnalysisResult, portion_rows: list[dict], clock_context: 
     ]
     jitter_rank_rows = _jitter_rank_rows(analysis)
     freq = analysis.freq_series or {}
+    chart_freq = _downsample_frequency_series(freq)
+    chart_clock_ramp_rows = _clock_ramp_chart_rows(clock_ramp_rows or [])
     first_runtime = analysis.runtime_rows[0].thread if analysis.runtime_rows else "configured targets"
     interval_samples = _interval_samples(analysis.runtime_rows)
     figure_values = {
@@ -95,15 +104,246 @@ def _figures(analysis: AnalysisResult, portion_rows: list[dict], clock_context: 
         "wakeup_cdf": charts.wakeup_cdf(analysis.wakeup_samples_by_cluster),
         "jitter_rank": charts.jitter_rank(jitter_rank_rows),
         "interval_strip": charts.interval_strip(interval_samples, target_ms=33.3, thread=first_runtime),
-        "freq_ts": charts.freq_timeline(freq, active_spans=clock_context["active_spans"]),
+        "freq_ts": charts.freq_timeline(chart_freq, active_spans=clock_context["active_spans"]),
         "freq_residency": charts.freq_residency(clock_context["residency_clusters"], clock_context["residency_buckets"], clock_context["residency"]),
         "freq_corr": charts.runtime_vs_freq(clock_context["freq_ghz"], clock_context["runtime_us"], clock_context["correlation"]),
-        "clock_ramps": charts.clock_ramp_attribution(clock_ramp_rows or []),
+        "clock_ramps": charts.clock_ramp_attribution(chart_clock_ramp_rows),
     }
     figures = {key: _figure_dict(value, key) for key, value in figure_values.items()}
     figures["hw_map"] = {"html": _hw_map_svg(_hw_usage(analysis)), "caption": "HW blocks are colored by detected evidence; grey means no direct evidence in the current trace audit."}
     figures["waker_chain"] = None
     return figures
+
+
+def _downsample_frequency_series(freq: dict[str, tuple[list[float], list[float]]], max_points: int = 1200) -> dict[str, tuple[list[float], list[float]]]:
+    if max_points < 2:
+        max_points = 2
+    result: dict[str, tuple[list[float], list[float]]] = {}
+    for cluster, (ts, values) in freq.items():
+        count = min(len(ts), len(values))
+        if count <= max_points:
+            result[cluster] = (ts[:count], values[:count])
+            continue
+        indices = [round(idx * (count - 1) / (max_points - 1)) for idx in range(max_points)]
+        result[cluster] = ([ts[idx] for idx in indices], [values[idx] for idx in indices])
+    return result
+
+
+def _clock_ramp_chart_rows(rows: list[dict], max_rows: int = 80) -> list[dict]:
+    if len(rows) <= max_rows:
+        return rows
+    buckets: dict[tuple[str, str], dict[str, float | int | str]] = {}
+    for row in rows:
+        cluster = str(row.get("cluster") or "unknown")
+        attribution = str(row.get("attribution") or "unknown")
+        delta_pct = float(row.get("delta_pct_float") or 0.0)
+        bucket = buckets.setdefault(
+            (cluster, attribution),
+            {
+                "cluster": cluster,
+                "attribution": attribution,
+                "count": 0,
+                "delta_total": 0.0,
+                "delta_max": 0.0,
+            },
+        )
+        bucket["count"] = int(bucket["count"]) + 1
+        bucket["delta_total"] = float(bucket["delta_total"]) + delta_pct
+        bucket["delta_max"] = max(float(bucket["delta_max"]), delta_pct)
+
+    aggregated = []
+    for bucket in buckets.values():
+        count = int(bucket["count"])
+        avg_delta = float(bucket["delta_total"]) / count if count else 0.0
+        max_delta = float(bucket["delta_max"])
+        cluster = str(bucket["cluster"])
+        attribution = str(bucket["attribution"])
+        aggregated.append(
+            {
+                "cluster": cluster,
+                "attribution": attribution,
+                "delta_pct_float": avg_delta,
+                "count": count,
+                "label": f"{cluster} · {attribution} · n={count}",
+                "text": f"avg +{avg_delta:.1f}% / max +{max_delta:.1f}%",
+            }
+        )
+    return sorted(aggregated, key=lambda row: (-int(row["count"]), str(row["cluster"]), str(row["attribution"])))
+
+
+def _significant_clock_change_rows(
+    analysis: AnalysisResult,
+    ramp_rows: list[dict],
+    drop_rows: list[dict],
+    config: ClockChangeFilterConfig,
+) -> tuple[list[dict], dict]:
+    candidates = _clock_change_candidates(analysis, config)
+    rows = []
+    for candidate in candidates:
+        row = _significant_clock_row(candidate, analysis.clock_ramp_windows, config)
+        if row is None:
+            continue
+        rows.append(row)
+    rows.sort(key=lambda row: (-float(row["impact_score"]), -abs(float(row["delta_vs_avg_pct"])), row["time_range"]))
+    display_rows = rows[: config.max_rows]
+    return display_rows, {
+        "baseline": config.baseline,
+        "ramp_delta_pct": config.ramp_delta_pct,
+        "drop_delta_pct": config.drop_delta_pct,
+        "min_duration_ms": config.min_duration_ms,
+        "merge_gap_ms": config.merge_gap_ms,
+        "max_rows": config.max_rows,
+        "include_unknown": config.include_unknown,
+        "raw_ramp_count": len(ramp_rows),
+        "raw_drop_count": len(drop_rows),
+        "candidate_count": len(rows),
+        "display_count": len(display_rows),
+    }
+
+
+def _clock_change_candidates(analysis: AnalysisResult, config: ClockChangeFilterConfig) -> list[dict]:
+    candidates: list[dict] = []
+    merge_gap_s = config.merge_gap_ms / 1000.0
+    min_duration_s = config.min_duration_ms / 1000.0
+    for cluster, series in sorted((analysis.freq_series or {}).items()):
+        baseline = _cluster_average_frequency(series)
+        if not baseline:
+            continue
+        active: dict | None = None
+        ts, values = series
+        count = min(len(ts), len(values))
+        for idx in range(max(0, count - 1)):
+            start_s = float(ts[idx])
+            end_s = float(ts[idx + 1])
+            if end_s <= start_s:
+                continue
+            freq = float(values[idx])
+            delta_pct = (freq - baseline) / baseline * 100.0
+            direction = ""
+            if delta_pct >= config.ramp_delta_pct:
+                direction = "up"
+            elif delta_pct <= -config.drop_delta_pct:
+                direction = "down"
+            if direction:
+                if active and active["direction"] == direction and start_s - float(active["end_s"]) <= merge_gap_s:
+                    _extend_clock_candidate(active, end_s, freq, delta_pct)
+                else:
+                    if active and float(active["end_s"]) - float(active["start_s"]) >= min_duration_s:
+                        candidates.append(active)
+                    active = _new_clock_candidate(cluster, direction, start_s, end_s, baseline, freq, delta_pct)
+            elif active:
+                if start_s - float(active["end_s"]) > merge_gap_s:
+                    if float(active["end_s"]) - float(active["start_s"]) >= min_duration_s:
+                        candidates.append(active)
+                    active = None
+        if active and float(active["end_s"]) - float(active["start_s"]) >= min_duration_s:
+            candidates.append(active)
+    return candidates
+
+
+def _cluster_average_frequency(series: tuple[list[float], list[float]]) -> float | None:
+    ts, values = series
+    count = min(len(ts), len(values))
+    if count == 0:
+        return None
+    weighted = 0.0
+    total_s = 0.0
+    for idx in range(count - 1):
+        duration_s = max(0.0, float(ts[idx + 1]) - float(ts[idx]))
+        weighted += float(values[idx]) * duration_s
+        total_s += duration_s
+    if total_s:
+        return weighted / total_s
+    return sum(float(value) for value in values[:count]) / count
+
+
+def _new_clock_candidate(cluster: str, direction: str, start_s: float, end_s: float, baseline: float, freq: float, delta_pct: float) -> dict:
+    return {
+        "cluster": cluster,
+        "direction": direction,
+        "start_s": start_s,
+        "end_s": end_s,
+        "baseline_ghz": baseline,
+        "extreme_ghz": freq,
+        "delta_vs_avg_pct": delta_pct,
+    }
+
+
+def _extend_clock_candidate(candidate: dict, end_s: float, freq: float, delta_pct: float) -> None:
+    candidate["end_s"] = end_s
+    current_delta = float(candidate["delta_vs_avg_pct"])
+    if abs(delta_pct) > abs(current_delta):
+        candidate["extreme_ghz"] = freq
+        candidate["delta_vs_avg_pct"] = delta_pct
+
+
+def _significant_clock_row(candidate: dict, ramp_windows: list, config: ClockChangeFilterConfig) -> dict | None:
+    direction = str(candidate["direction"])
+    cluster = str(candidate["cluster"])
+    start_s = float(candidate["start_s"])
+    end_s = float(candidate["end_s"])
+    baseline = float(candidate["baseline_ghz"])
+    extreme = float(candidate["extreme_ghz"])
+    delta_pct = float(candidate["delta_vs_avg_pct"])
+    duration_ms = (end_s - start_s) * 1000.0
+    attribution = "clock_below_average"
+    confidence = "measured"
+    top_corunner = "N/A: no co-runner attribution for clock decrease"
+    evidence = f"{direction} window exceeds cluster average by {delta_pct:+.1f}%"
+    if direction == "up":
+        attribution_window = _best_overlapping_ramp_window(cluster, start_s, end_s, ramp_windows)
+        if attribution_window is None:
+            attribution = "unknown"
+            confidence = "low"
+            top_corunner = "N/A: no overlapping scheduler attribution"
+            evidence = "N/A: no overlapping clock ramp attribution window"
+        else:
+            attribution = attribution_window.attribution
+            confidence = attribution_window.confidence
+            top = _first_actionable_corunner(attribution_window.top_corunners)
+            top_corunner = f"{top['thread']} {top['runtime_us']}us" if top else "N/A: no co-runner in ramp window"
+            evidence = "; ".join(attribution_window.evidence) if attribution_window.evidence else "N/A: no attribution evidence"
+        if attribution == "unknown" and not config.include_unknown:
+            return None
+    impact = abs(delta_pct) * max(duration_ms, 0.001)
+    return {
+        "time_range": f"{start_s:.3f}-{end_s:.3f}",
+        "t": f"{start_s:.3f}",
+        "cluster": cluster,
+        "direction": direction,
+        "freq": f"{baseline:.2f}->{extreme:.2f}G",
+        "cluster_avg": f"{baseline:.2f}G",
+        "delta_vs_avg": f"{delta_pct:+.1f}%",
+        "delta_vs_avg_pct": round(delta_pct, 3),
+        "duration_ms": f"{duration_ms:.1f}",
+        "impact_score": round(impact, 3),
+        "attribution": attribution,
+        "confidence": confidence,
+        "top_corunner": top_corunner,
+        "evidence": evidence,
+    }
+
+
+def _best_overlapping_ramp_window(cluster: str, start_s: float, end_s: float, ramp_windows: list) -> object | None:
+    best_window = None
+    best_overlap = 0.0
+    for window in ramp_windows:
+        if window.cluster != cluster:
+            continue
+        overlap = min(end_s, window.end_s) - max(start_s, window.start_s)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_window = window
+    return best_window
+
+
+def _first_actionable_corunner(corunners: list[dict]) -> dict | None:
+    for corunner in corunners:
+        thread = str(corunner.get("thread") or "")
+        if thread.lower().startswith("swapper"):
+            continue
+        return corunner
+    return corunners[0] if corunners else None
 
 
 def _figure_dict(value: tuple[str, str], key: str) -> dict:
@@ -379,7 +619,7 @@ def _issues(analysis: AnalysisResult, runtime_rows: list[dict], jitter_rows: lis
     return issues[:5]
 
 
-def _verdicts(analysis: AnalysisResult, hw_usage: list[dict], portion_rows: list[dict], runtime_rows: list[dict], jitter_rows: list[dict], clock_context: dict, clock_rows: list[dict]) -> dict:
+def _verdicts(analysis: AnalysisResult, hw_usage: list[dict], portion_rows: list[dict], runtime_rows: list[dict], jitter_rows: list[dict], clock_context: dict, clock_rows: list[dict], significant_clock_rows: list[dict] | None = None) -> dict:
     used = [row["name"] for row in hw_usage if row["status"] == "ok"]
     unknown = [row["name"] for row in hw_usage if row["status"] != "ok"]
     top_portion = max(portion_rows, key=lambda row: float(row["time_pct"]) if _is_number(row["time_pct"]) else 0.0)
@@ -394,7 +634,7 @@ def _verdicts(analysis: AnalysisResult, hw_usage: list[dict], portion_rows: list
         "portion": f"Multimedia SW = {sum(float(row['time_pct']) for row in portion_rows):.1f}% of configured multimedia CPU running time. Largest driver: {top_portion['name']} ({top_portion['time_pct']}%).",
         "runtime": runtime_verdict,
         "jitter": jitter_verdict,
-        "clock": _clock_verdict(clock_context, clock_rows),
+        "clock": _clock_verdict(clock_context, clock_rows, significant_clock_rows),
         "contention": f"During {runtime_rows[0]['thread'] if runtime_rows else 'configured target'} outliers, co-runner attribution is candidate-only.",
     }
 
@@ -445,21 +685,25 @@ def _capability(analysis: AnalysisResult) -> dict:
     }
 
 
-def _kpis(analysis: AnalysisResult, runtime_rows: list[dict], jitter_rows: list[dict], clock_rows: list[dict] | None = None) -> list[dict]:
+def _kpis(analysis: AnalysisResult, runtime_rows: list[dict], jitter_rows: list[dict], clock_rows: list[dict] | None = None, significant_clock_rows: list[dict] | None = None) -> list[dict]:
     clock_rows = clock_rows if clock_rows is not None else _clock_rows(_clock_context(analysis))
+    significant_clock_rows = significant_clock_rows or []
     worst_cov = max([float(row["cov"]) for row in runtime_rows if _is_number(row["cov"])] or [0.0])
     max_p99 = max([float(row["p99"]) for row in jitter_rows if _is_number(str(row["p99"]))] or [0.0])
     return [
         {"label": "Target threads", "value": f"{len(analysis.matched_threads)}", "status": "ok" if analysis.matched_threads else "warn", "sub": "matched in trace string audit"},
         {"label": "Worst runtime CoV", "value": f"{worst_cov:.2f}", "status": "warn" if worst_cov >= 0.5 else "ok", "sub": "sched running-burst distribution"},
         {"label": "Max wakeup p99", "value": f"{max_p99:.0f}µs" if max_p99 else "N/A", "status": "warn" if max_p99 else "na", "sub": "cluster baseline comparison in §5"},
-        {"label": "Clock-drop events", "value": f"{len(clock_rows)}", "status": "warn" if clock_rows else "na", "sub": "runtime/frequency overlap threshold"},
+        {"label": "Clock change windows", "value": f"{len(significant_clock_rows)}", "status": "warn" if significant_clock_rows else "na", "sub": "avg-relative filter in §6"},
     ]
 
 
-def _clock_verdict(clock_context: dict, clock_rows: list[dict]) -> str:
+def _clock_verdict(clock_context: dict, clock_rows: list[dict], significant_clock_rows: list[dict] | None = None) -> str:
     sample_count = clock_context["summary"]["sample_count"]
+    significant_count = len(significant_clock_rows or [])
     ramp_count = int(clock_context["summary"].get("ramp_count") or 0)
+    if significant_count:
+        return f"{significant_count} significant average-relative clock windows shown; raw evidence has {ramp_count} ramp rows and {len(clock_rows)} drop rows."
     if ramp_count:
         return f"{ramp_count} clock ramp attribution rows; {sample_count} runtime/frequency overlap samples measured."
     if clock_rows:
@@ -600,7 +844,7 @@ def _clock_rows(clock_context: dict) -> list[dict]:
 
 def _clock_ramp_rows(analysis: AnalysisResult) -> list[dict]:
     rows = []
-    for window in analysis.clock_ramp_windows[:20]:
+    for window in analysis.clock_ramp_windows:
         top = window.top_corunners[0] if window.top_corunners else None
         rows.append(
             {

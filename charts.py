@@ -75,6 +75,40 @@ def _placeholder(reason: str) -> str:
             f'border:1px dashed {COL["line"]};border-radius:8px">'
             f'no data: {reason}</div>')
 
+
+def _rgba(hex_color: str, opacity: float) -> str:
+    value = hex_color.lstrip("#")
+    red = int(value[0:2], 16)
+    green = int(value[2:4], 16)
+    blue = int(value[4:6], 16)
+    return f"rgba({red},{green},{blue},{opacity})"
+
+
+def _active_span_bounds(cluster_series) -> tuple[float, float]:
+    values = [
+        float(value)
+        for _, ghz_values in cluster_series.values()
+        for value in ghz_values
+    ]
+    if not values:
+        return 0.0, 1.0
+    lower = min(values)
+    upper = max(values)
+    if lower == upper:
+        padding = max(0.1, lower * 0.05)
+    else:
+        padding = (upper - lower) * 0.03
+    return lower - padding, upper + padding
+
+
+def _active_span_polygons(active_spans, y_min: float, y_max: float):
+    xs = []
+    ys = []
+    for t0, t1 in active_spans or []:
+        xs.extend([t0, t0, t1, t1, None])
+        ys.extend([y_min, y_max, y_max, y_min, None])
+    return xs, ys
+
 # ============================================================================
 # §3  HW SW PORTION  — 100% stacked horizontal bar (donut alt)
 #   spec: denominator IN TITLE; HW fixed colors; Other = remainder
@@ -202,13 +236,17 @@ def freq_timeline(cluster_series, active_spans=None):
     if not cluster_series:
         return _placeholder("cpu_frequency counter absent"), ""
     fig = go.Figure()
+    if active_spans:
+        y_min, y_max = _active_span_bounds(cluster_series)
+        span_xs, span_ys = _active_span_polygons(active_spans, y_min, y_max)
+        fig.add_trace(go.Scatter(
+            x=span_xs, y=span_ys, mode="lines", fill="toself",
+            name="target active", showlegend=False, hoverinfo="skip",
+            line=dict(width=0), fillcolor=_rgba(COL["info"], 0.10)))
     for cl, (ts, gh) in cluster_series.items():
         fig.add_trace(go.Scatter(
             x=ts, y=gh, mode="lines", name=cl,
             line=dict(color=CLUSTER_COL.get(cl, "#888"), width=1.4)))
-    for (t0, t1) in (active_spans or []):
-        fig.add_vrect(x0=t0, x1=t1, fillcolor=COL["info"], opacity=0.10,
-                      line_width=0)
     fig.update_layout(**_layout(
         height=280,
         xaxis=dict(title="time (s)"),
@@ -261,9 +299,13 @@ def clock_ramp_attribution(rows):
     labels = []
     values = []
     colors = []
+    texts = []
+    aggregated = any(int(row.get("count", 1) or 1) > 1 for row in rows)
     for row in rows:
-        labels.append(f"{row['cluster']} · {row['attribution']}")
-        values.append(float(row.get("delta_pct_float", 0.0)))
+        value = float(row.get("delta_pct_float", 0.0))
+        labels.append(str(row.get("label") or f"{row['cluster']} · {row['attribution']}"))
+        values.append(value)
+        texts.append(str(row.get("text") or f"+{value:.1f}%"))
         attribution = str(row.get("attribution", "unknown"))
         colors.append(
             {
@@ -278,7 +320,7 @@ def clock_ramp_attribution(rows):
         x=values,
         orientation="h",
         marker_color=colors,
-        text=[f"+{value:.1f}%" for value in values],
+        text=texts,
         textposition="outside",
         textfont=dict(size=10),
     ))
@@ -288,5 +330,8 @@ def clock_ramp_attribution(rows):
         xaxis=dict(title="freq increase vs baseline (%)"),
         margin=dict(l=180, r=80, t=14, b=42),
     ))
-    cap = "Clock ramp windows grouped by cluster and attribution; bar length is frequency increase versus local baseline."
+    if aggregated:
+        cap = "Clock ramp windows aggregated by cluster and attribution; bar length is average frequency increase, and text shows average/max across all windows."
+    else:
+        cap = "Clock ramp windows grouped by cluster and attribution; bar length is frequency increase versus local baseline."
     return _emit(fig), cap

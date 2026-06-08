@@ -35,6 +35,22 @@ class CpuTopology:
 
 
 @dataclass(frozen=True)
+class ClockChangeFilterConfig:
+    baseline: str = "duration_weighted_mean"
+    ramp_delta_pct: float = 15.0
+    drop_delta_pct: float = 15.0
+    min_duration_ms: float = 5.0
+    merge_gap_ms: float = 3.0
+    max_rows: int = 20
+    include_unknown: bool = False
+
+
+@dataclass(frozen=True)
+class ReportFilters:
+    clock_change: ClockChangeFilterConfig = field(default_factory=ClockChangeFilterConfig)
+
+
+@dataclass(frozen=True)
 class EventConfig:
     path: Path
     description: str
@@ -43,6 +59,7 @@ class EventConfig:
     thread_targets: list[ThreadTarget]
     raw: dict[str, Any]
     cpu_topology: CpuTopology = field(default_factory=lambda: CpuTopology(source="absent", clusters=[]))
+    report_filters: ReportFilters = field(default_factory=ReportFilters)
 
 
 def load_event_config(path: Path | str) -> EventConfig:
@@ -57,6 +74,7 @@ def load_event_config(path: Path | str) -> EventConfig:
         event_count=len(events),
         thread_targets=targets,
         cpu_topology=_extract_cpu_topology(raw.get("cpu_topology")),
+        report_filters=_extract_report_filters(raw.get("report_filters")),
         raw=raw,
     )
 
@@ -171,6 +189,27 @@ def _extract_cpu_topology(value: Any) -> CpuTopology:
     return CpuTopology(source=str(value.get("source") or "event_config"), clusters=clusters)
 
 
+def _extract_report_filters(value: Any) -> ReportFilters:
+    if not isinstance(value, dict):
+        return ReportFilters()
+    return ReportFilters(clock_change=_extract_clock_change_filter(value.get("clock_change")))
+
+
+def _extract_clock_change_filter(value: Any) -> ClockChangeFilterConfig:
+    if not isinstance(value, dict):
+        return ClockChangeFilterConfig()
+    default = ClockChangeFilterConfig()
+    return ClockChangeFilterConfig(
+        baseline=str(value.get("baseline") or default.baseline),
+        ramp_delta_pct=_to_float(value.get("ramp_delta_pct")) or default.ramp_delta_pct,
+        drop_delta_pct=_to_float(value.get("drop_delta_pct")) or default.drop_delta_pct,
+        min_duration_ms=_to_float(value.get("min_duration_ms")) or default.min_duration_ms,
+        merge_gap_ms=_to_float(value.get("merge_gap_ms")) or default.merge_gap_ms,
+        max_rows=_to_positive_int(value.get("max_rows"), default.max_rows),
+        include_unknown=_to_bool(value.get("include_unknown"), default.include_unknown),
+    )
+
+
 def _to_int_list(value: Any) -> list[int]:
     if not isinstance(value, list):
         return []
@@ -181,3 +220,23 @@ def _to_int_list(value: Any) -> list[int]:
         except (TypeError, ValueError):
             continue
     return cpus
+
+
+def _to_positive_int(value: Any, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _to_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"true", "1", "yes", "y", "on"}:
+            return True
+        if lowered in {"false", "0", "no", "n", "off"}:
+            return False
+    return default
